@@ -1,0 +1,8 @@
+{
+  "name": "@agentrouter/openapi",
+  "version": "0.1.0",
+  "type": "module",
+  "files": [
+    "openapi.yaml"
+  ]
+}

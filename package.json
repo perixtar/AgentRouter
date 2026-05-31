@@ -1,0 +1,39 @@
+{
+  "name": "agentrouter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.2",
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:api": "vitest run tests/integration/api",
+    "test:sdk": "vitest run tests/integration/sdk",
+    "test:worker": "vitest run tests/integration/worker",
+    "test:db": "vitest run tests/integration/db",
+    "test:r2": "vitest run tests/integration/r2",
+    "test:daytona": "vitest run tests/integration/daytona",
+    "test:providers:smoke": "vitest run tests/integration/providers",
+    "test:e2e:codex": "AGENTROUTER_RUN_REAL_E2E=1 vitest run tests/e2e/codex-api-worker.test.ts",
+    "api:dev": "tsx apps/api/src/main.ts",
+    "worker:run-once": "AGENTROUTER_WORKER_RUN_ONCE=1 tsx apps/worker/src/main.ts",
+    "worker:dev": "tsx apps/worker/src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.927.0",
+    "@aws-sdk/s3-request-presigner": "^3.927.0",
+    "@daytona/sdk": "^0.183.0",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.2",
+    "pg": "^8.16.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "@types/pg": "^8.15.6",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.6"
+  }
+}

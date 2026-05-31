@@ -1,0 +1,15 @@
+{
+  "name": "@agentrouter/worker-app",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@agentrouter/artifacts-r2": "workspace:*",
+    "@agentrouter/config": "workspace:*",
+    "@agentrouter/db": "workspace:*",
+    "@agentrouter/sandbox-daytona": "workspace:*",
+    "@agentrouter/worker": "workspace:*",
+    "dotenv": "^17.4.2",
+    "pg": "^8.21.0"
+  }
+}

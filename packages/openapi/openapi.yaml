@@ -1,0 +1,395 @@
+openapi: 3.1.0
+info:
+  title: AgentRouter Runtime API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8787
+security:
+  - bearerAuth: []
+paths:
+  /v1/runs:
+    get:
+      operationId: listRuns
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, queued, starting, running, cancelling, cancelled, completed, failed]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Recent runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Run"
+    post:
+      operationId: createRun
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRunRequest"
+      responses:
+        "201":
+          description: Run created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "200":
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}:
+    get:
+      operationId: getRun
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Run status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/session:
+    get:
+      operationId: restoreRunSession
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Replayable session snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSession"
+  /v1/runs/{runId}/stream:
+    get:
+      operationId: streamRunEvents
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: afterSeq
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/runs/{runId}/events:
+    get:
+      operationId: listRunEvents
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: afterSeq
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Ordered event page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextAfterSeq]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RunEvent"
+                  nextAfterSeq:
+                    type: integer
+  /v1/runs/{runId}/cancel:
+    post:
+      operationId: cancelRun
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Run cancel requested or already terminal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+  /v1/runs/{runId}/artifacts:
+    get:
+      operationId: listRunArtifacts
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: R2-backed artifacts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Artifact"
+  /v1/runs/{runId}/artifacts/{artifactId}/download:
+    get:
+      operationId: downloadRunArtifact
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Artifact bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Typed API error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    RuntimeKind:
+      type: string
+      enum: [codex, claude_code]
+    RuntimeMode:
+      type: string
+      enum: [default, read_only, full_access, auto_review]
+    RunStatus:
+      type: string
+      enum: [queued, starting, running, cancelling, cancelled, completed, failed]
+    CreateRunRequest:
+      type: object
+      additionalProperties: false
+      required: [task]
+      properties:
+        task:
+          type: string
+          minLength: 1
+        runtime:
+          type: object
+          properties:
+            kind:
+              $ref: "#/components/schemas/RuntimeKind"
+            mode:
+              $ref: "#/components/schemas/RuntimeMode"
+        source:
+          oneOf:
+            - type: object
+              required: [type, repoUrl]
+              properties:
+                type:
+                  const: git
+                repoUrl:
+                  type: string
+                  format: uri
+                branch:
+                  type: string
+                baseRef:
+                  type: string
+            - type: object
+              required: [type]
+              properties:
+                type:
+                  const: scratch
+        metadata:
+          type: object
+          additionalProperties: true
+    Run:
+      type: object
+      required: [id, status, runtime, task, input, lastEventSeq, queuedAt]
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        runtime:
+          type: object
+          required: [kind, mode]
+          properties:
+            kind:
+              $ref: "#/components/schemas/RuntimeKind"
+            mode:
+              $ref: "#/components/schemas/RuntimeMode"
+        task:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+        lastEventSeq:
+          type: integer
+        queuedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        cancelRequestedAt:
+          type: string
+          format: date-time
+        failure:
+          type: object
+          properties:
+            code:
+              type: string
+            reason:
+              type: string
+    RunEvent:
+      type: object
+      required: [runId, sequence, type, source, visibility, payload, isTruncated, createdAt]
+      properties:
+        runId:
+          type: string
+        sequence:
+          type: integer
+        type:
+          type: string
+        source:
+          type: string
+        visibility:
+          type: string
+          enum: [public, internal, redacted]
+        payload:
+          type: object
+          additionalProperties: true
+        artifactRef:
+          type: object
+          properties:
+            artifactId:
+              type: string
+            r2Key:
+              type: string
+        isTruncated:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+    Artifact:
+      type: object
+      required: [id, runId, kind, r2Key, sizeBytes, sha256, metadata, createdAt]
+      properties:
+        id:
+          type: string
+        runId:
+          type: string
+        kind:
+          type: string
+        r2Key:
+          type: string
+        contentType:
+          type: string
+        sizeBytes:
+          type: integer
+        sha256:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    RunSession:
+      type: object
+      required: [run, eventCursor, artifactManifest, artifacts]
+      properties:
+        run:
+          $ref: "#/components/schemas/Run"
+        eventCursor:
+          type: object
+          required: [lastEventSeq]
+          properties:
+            lastEventSeq:
+              type: integer
+        artifactManifest:
+          type: object
+          additionalProperties: true
+        artifacts:
+          type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/Artifact"
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true

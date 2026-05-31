@@ -1,0 +1,15 @@
+{
+  "name": "@agentrouter/worker",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agentrouter/artifacts-r2": "workspace:*",
+    "@agentrouter/credential-boundary": "workspace:*",
+    "@agentrouter/db": "workspace:*",
+    "@agentrouter/runtime-codex-cli": "workspace:*",
+    "pg": "^8.21.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@agentrouter/sandbox-daytona",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@daytona/sdk": "^0.183.0"
+  }
+}

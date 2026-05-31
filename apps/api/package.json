@@ -1,0 +1,16 @@
+{
+  "name": "@agentrouter/api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "dependencies": {
+    "@agentrouter/core": "workspace:*",
+    "@agentrouter/db": "workspace:*",
+    "@agentrouter/artifacts-r2": "workspace:*",
+    "fastify": "^5.8.5",
+    "pg": "^8.21.0",
+    "zod": "^4.4.3"
+  }
+}
