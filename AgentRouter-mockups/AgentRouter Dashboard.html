@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="green" data-density="regular">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentRouter — Control Plane</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --font-sans:"Geist","SF Pro Text",system-ui,-apple-system,sans-serif;
+  --font-mono:"Geist Mono","SF Mono",ui-monospace,Menlo,monospace;
+  --r-sm:5px; --r-md:8px; --r-lg:12px; --r-xl:16px;
+  --ease:cubic-bezier(.32,.72,.34,1);
+
+  /* accent (overridden by [data-accent]) */
+  --acc:oklch(0.80 0.155 152);
+  --acc-ink:#06140c;
+  --acc-soft:oklch(0.80 0.155 152 / 0.12);
+  --acc-line:oklch(0.80 0.155 152 / 0.30);
+
+  /* semantic status */
+  --ok:oklch(0.80 0.15 152);
+  --warn:oklch(0.82 0.15 80);
+  --danger:oklch(0.68 0.19 25);
+  --info:oklch(0.74 0.13 245);
+}
+
+/* ── ACCENTS ── */
+[data-accent="green"]{ --acc:oklch(0.80 0.155 152); --acc-ink:#06140c; --acc-soft:oklch(0.80 0.155 152/.12); --acc-line:oklch(0.80 0.155 152/.32); }
+[data-accent="blue"]{ --acc:oklch(0.72 0.14 245); --acc-ink:#04101f; --acc-soft:oklch(0.72 0.14 245/.14); --acc-line:oklch(0.72 0.14 245/.34); }
+[data-accent="orange"]{ --acc:oklch(0.76 0.16 52); --acc-ink:#1c0c02; --acc-soft:oklch(0.76 0.16 52/.14); --acc-line:oklch(0.76 0.16 52/.34); }
+[data-accent="violet"]{ --acc:oklch(0.72 0.15 295); --acc-ink:#120422; --acc-soft:oklch(0.72 0.15 295/.16); --acc-line:oklch(0.72 0.15 295/.34); }
+
+/* ── DARK ── */
+[data-theme="dark"]{
+  --bg:oklch(0.165 0.006 256);
+  --bg-1:oklch(0.195 0.007 256);
+  --bg-2:oklch(0.225 0.008 256);
+  --bg-3:oklch(0.255 0.009 256);
+  --bg-inset:oklch(0.145 0.006 256);
+  --line:oklch(0.30 0.009 256);
+  --line-soft:oklch(0.255 0.008 256);
+  --line-strong:oklch(0.38 0.01 256);
+  --tx:oklch(0.96 0.004 256);
+  --tx-2:oklch(0.74 0.008 256);
+  --tx-3:oklch(0.56 0.009 256);
+  --tx-4:oklch(0.44 0.009 256);
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+  --shadow-lg:0 12px 48px rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+/* ── LIGHT ── */
+[data-theme="light"]{
+  --bg:oklch(0.985 0.002 256);
+  --bg-1:oklch(1 0 0);
+  --bg-2:oklch(0.975 0.003 256);
+  --bg-3:oklch(0.955 0.004 256);
+  --bg-inset:oklch(0.965 0.003 256);
+  --line:oklch(0.90 0.004 256);
+  --line-soft:oklch(0.935 0.003 256);
+  --line-strong:oklch(0.84 0.006 256);
+  --tx:oklch(0.22 0.01 256);
+  --tx-2:oklch(0.42 0.01 256);
+  --tx-3:oklch(0.56 0.009 256);
+  --tx-4:oklch(0.66 0.008 256);
+  --shadow:0 1px 2px rgba(20,22,28,.06),0 8px 24px rgba(20,22,28,.07);
+  --shadow-lg:0 16px 50px rgba(20,22,28,.14);
+  color-scheme:light;
+}
+
+/* density */
+[data-density="compact"]{ --row-h:34px; --pad:14px; }
+[data-density="regular"]{ --row-h:42px; --pad:18px; }
+[data-density="comfy"]{ --row-h:52px; --pad:24px; }
+
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{height:100%;}
+body{
+  font-family:var(--font-sans);
+  background:var(--bg);
+  color:var(--tx);
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  font-size:14px;
+  line-height:1.45;
+  letter-spacing:-0.005em;
+  overflow:hidden;
+}
+#root{height:100vh;}
+::selection{background:var(--acc-soft);}
+a{color:inherit;text-decoration:none;}
+button{font-family:inherit;}
+.mono{font-family:var(--font-mono);font-feature-settings:"ss01","zero";}
+.tnum{font-variant-numeric:tabular-nums;}
+
+/* scrollbars */
+*::-webkit-scrollbar{width:10px;height:10px;}
+*::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px;border:2px solid transparent;background-clip:content-box;}
+*::-webkit-scrollbar-thumb:hover{background:var(--line-strong);background-clip:content-box;border:2px solid transparent;}
+*::-webkit-scrollbar-track{background:transparent;}
+
+@keyframes pulse-dot{0%,100%{opacity:1;}50%{opacity:.35;}}
+@keyframes spin{to{transform:rotate(360deg);}}
+@keyframes fadeUp{from{transform:translateY(7px);}to{transform:none;}}
+@keyframes streamIn{from{transform:translateX(-7px);}to{transform:none;}}
+@keyframes shimmer{0%{background-position:-200% 0;}100%{background-position:200% 0;}}
+.fade-up{animation:fadeUp .32s var(--ease) both;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="app/tweaks-panel.jsx"></script>
+<script type="text/babel" src="app/data.jsx"></script>
+<script type="text/babel" src="app/ui.jsx"></script>
+<script type="text/babel" src="app/screen_overview.jsx"></script>
+<script type="text/babel" src="app/screen_keys.jsx"></script>
+<script type="text/babel" src="app/screen_run.jsx"></script>
+<script type="text/babel" src="app/screen_approvals.jsx"></script>
+<script type="text/babel" src="app/app.jsx"></script>
+</body>
+</html>
