@@ -62,6 +62,8 @@ pnpm test:e2e:claude
 
 ```sh
 pnpm test
+pnpm test:ci
+pnpm test:external
 pnpm test:db
 pnpm test:r2
 pnpm test:daytona
@@ -72,11 +74,32 @@ pnpm test:e2e:claude
 pnpm typecheck
 ```
 
+## GitHub Actions Tests
+
+`.github/workflows/test.yml` runs typecheck and local DB-backed tests on pull requests
+and pushes to `main`. Pushes to `main` and manual runs also run real R2, Daytona,
+Codex, and Claude Code E2E tests.
+
+GitHub Actions E2E uses repository secrets:
+
+```sh
+DAYTONA_API_KEY
+OPENAI_API_KEY
+ANTHROPIC_API_KEY
+R2_ACCOUNT_ID
+R2_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY
+R2_BUCKET
+R2_ENDPOINT
+```
+
+The CI jobs create their own Postgres service and use a per-job R2 artifact prefix.
+
 ## Fly.io Deployment
 
 The repo includes `fly.toml`, `Dockerfile`, and `.github/workflows/fly.yml`.
-The workflow deploys on pushes to `main` and can also be run manually from
-GitHub Actions.
+The workflow deploys after the `Tests` workflow succeeds on `main` and can also be
+run manually from GitHub Actions.
 
 GitHub Actions uses:
 

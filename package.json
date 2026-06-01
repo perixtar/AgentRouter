@@ -6,6 +6,7 @@
   "packageManager": "pnpm@10.18.2",
   "scripts": {
     "test": "vitest run",
+    "test:ci": "vitest run tests/unit tests/integration/api tests/integration/sdk tests/integration/db",
     "test:unit": "vitest run tests/unit",
     "test:api": "vitest run tests/integration/api",
     "test:sdk": "vitest run tests/integration/sdk",
@@ -13,6 +14,7 @@
     "test:db": "vitest run tests/integration/db",
     "test:r2": "vitest run tests/integration/r2",
     "test:daytona": "vitest run tests/integration/daytona",
+    "test:external": "vitest run tests/integration/r2 tests/integration/daytona tests/integration/providers tests/integration/worker",
     "test:providers:smoke": "vitest run tests/integration/providers",
     "test:e2e:codex": "AGENTROUTER_RUN_REAL_E2E=1 vitest run tests/e2e/codex-api-worker.test.ts",
     "test:e2e:claude": "AGENTROUTER_RUN_REAL_E2E=1 vitest run tests/e2e/claude-api-worker.test.ts",
