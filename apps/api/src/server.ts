@@ -5,7 +5,7 @@ import Fastify, {
   type FastifyRequest
 } from "fastify";
 import type { Pool, PoolClient } from "pg";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import {
   RunRepository,
   type ArtifactRecord,
@@ -13,6 +13,7 @@ import {
   type RunRecord,
   withSearchPath
 } from "@agentrouter/db";
+import type { RuntimePermissionValue } from "@agentrouter/core";
 
 export interface BuildApiServerInput {
   pool: Pool;
@@ -23,28 +24,39 @@ export interface BuildApiServerInput {
   };
 }
 
-const runtimeSchema = z.object({
-  kind: z.enum(["codex", "claude_code"]),
-  mode: z.enum(["default", "read_only", "full_access", "auto_review"]).default("default")
+const runtimeModelSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:/-]+$/, "Model can contain letters, numbers, '.', '_', ':', '/', and '-'");
+
+const codexRuntimeSchema = z.strictObject({
+  kind: z.literal("codex"),
+  mode: z.enum(["default", "read_only", "full_access", "auto_review"]).default("default"),
+  model: runtimeModelSchema.optional()
 });
 
-const sourceSchema = z
-  .object({
-    type: z.enum(["git", "scratch"]).default("scratch"),
-    repoUrl: z.string().url().optional(),
-    branch: z.string().min(1).optional(),
-    baseRef: z.string().min(1).optional()
-  })
-  .optional();
+const claudeCodeRuntimeSchema = z.strictObject({
+  kind: z.literal("claude_code"),
+  permissionMode: z
+    .enum(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"])
+    .default("default"),
+  model: runtimeModelSchema.optional()
+});
 
-const createRunSchema = z.object({
+const runtimeSchema = z
+  .discriminatedUnion("kind", [codexRuntimeSchema, claudeCodeRuntimeSchema])
+  .default({ kind: "codex", mode: "default" });
+
+const createRunSchema = z.strictObject({
   task: z.string().trim().min(1).max(120_000),
-  source: sourceSchema,
   runtime: runtimeSchema.default({ kind: "codex", mode: "default" }),
   metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 const unsupportedConfigKeys = new Set([
+  "model",
   "tools",
   "mcpServers",
   "rawArgs",
@@ -53,6 +65,8 @@ const unsupportedConfigKeys = new Set([
   "codexArgs",
   "claudeArgs"
 ]);
+
+const unsupportedWorkspaceKeys = new Set(["source", "repoUrl", "workspace", "checkout"]);
 
 export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
   const server = Fastify({ logger: false });
@@ -64,6 +78,17 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
           code: error.code,
           message: error.message,
           details: error.details ?? {}
+        }
+      });
+      return;
+    }
+
+    if (error instanceof ZodError) {
+      reply.status(400).send({
+        error: {
+          code: "validation_error",
+          message: "Invalid request",
+          details: { issues: error.issues }
         }
       });
       return;
@@ -111,7 +136,7 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
   });
 
   server.post("/v1/runs", async (request, reply) => {
-    assertNoUnsupportedToolConfiguration(request.body);
+    assertNoUnsupportedConfiguration(request.body);
     const parsed = createRunSchema.parse(request.body);
 
     if (parsed.runtime.kind !== "codex") {
@@ -172,7 +197,8 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
         const run = await repo.createRun({
           id: runId,
           runtimeKind: parsed.runtime.kind,
-          runtimeMode: parsed.runtime.mode,
+          runtimeMode: runtimePermissionValueFromRequest(parsed.runtime),
+          runtimeModel: parsed.runtime.model,
           input: parsed,
           promptSummary: parsed.task.slice(0, 500)
         });
@@ -340,9 +366,17 @@ function authenticate(request: FastifyRequest, apiKey: string): void {
   }
 }
 
-function assertNoUnsupportedToolConfiguration(body: unknown): void {
+function assertNoUnsupportedConfiguration(body: unknown): void {
   if (!body || typeof body !== "object" || Array.isArray(body)) return;
   for (const key of Object.keys(body)) {
+    if (unsupportedWorkspaceKeys.has(key)) {
+      throw new ApiError(
+        400,
+        "unsupported_workspace_attachment",
+        "Workspace attachments are not supported in Phase 1"
+      );
+    }
+
     if (unsupportedConfigKeys.has(key)) {
       throw new ApiError(
         400,
@@ -367,10 +401,7 @@ function runToApi(run: RunRecord): Record<string, unknown> {
   return {
     id: run.id,
     status: run.status,
-    runtime: {
-      kind: run.runtimeKind,
-      mode: run.runtimeMode
-    },
+    runtime: runtimeToApi(run.runtimeKind, run.runtimeMode, run.runtimeModel),
     task: run.promptSummary,
     input: run.input,
     lastEventSeq: Number(run.lastEventSeq),
@@ -383,6 +414,36 @@ function runToApi(run: RunRecord): Record<string, unknown> {
         ? { code: run.failureCode, reason: run.failureReason }
         : undefined
   };
+}
+
+function runtimePermissionValueFromRequest(runtime: z.infer<typeof runtimeSchema>): RuntimePermissionValue {
+  return runtime.kind === "codex" ? runtime.mode : runtime.permissionMode;
+}
+
+function runtimeToApi(
+  runtimeKind: string,
+  runtimeMode: string,
+  runtimeModel?: string
+): Record<string, string> {
+  if (runtimeKind === "claude_code") {
+    return compactStringRecord({
+      kind: runtimeKind,
+      permissionMode: runtimeMode,
+      model: runtimeModel
+    });
+  }
+
+  return compactStringRecord({
+    kind: runtimeKind,
+    mode: runtimeMode,
+    model: runtimeModel
+  });
+}
+
+function compactStringRecord(input: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(input).filter((entry): entry is [string, string] => entry[1] !== undefined)
+  );
 }
 
 function eventToApi(event: EventRecord): Record<string, unknown> {

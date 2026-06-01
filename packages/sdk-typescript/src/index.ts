@@ -4,26 +4,36 @@ export interface AgentRouterOptions {
   fetchImpl?: typeof fetch;
 }
 
-export interface RuntimeSelection {
-  kind: "codex" | "claude_code";
-  mode?: "default" | "read_only" | "full_access" | "auto_review";
+export type CodexRuntimeMode = "default" | "read_only" | "full_access" | "auto_review";
+export type ClaudeCodePermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "plan"
+  | "auto"
+  | "dontAsk"
+  | "bypassPermissions";
+
+export interface CodexRuntimeSelection {
+  kind: "codex";
+  mode?: CodexRuntimeMode;
+  model?: string;
 }
 
-export interface GitSource {
-  type: "git";
-  repoUrl: string;
-  branch?: string;
-  baseRef?: string;
+export interface ClaudeCodeRuntimeSelection {
+  kind: "claude_code";
+  permissionMode?: ClaudeCodePermissionMode;
+  model?: string;
 }
 
-export interface ScratchSource {
-  type: "scratch";
-}
+export type RuntimeSelection = CodexRuntimeSelection | ClaudeCodeRuntimeSelection;
+
+export type ResolvedRuntimeSelection =
+  | (CodexRuntimeSelection & { mode: CodexRuntimeMode })
+  | (ClaudeCodeRuntimeSelection & { permissionMode: ClaudeCodePermissionMode });
 
 export interface CreateRunRequest {
   task: string;
   runtime?: RuntimeSelection;
-  source?: GitSource | ScratchSource;
   metadata?: Record<string, unknown>;
   idempotencyKey?: string;
 }
@@ -31,7 +41,7 @@ export interface CreateRunRequest {
 export interface Run {
   id: string;
   status: "queued" | "starting" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
-  runtime: Required<RuntimeSelection>;
+  runtime: ResolvedRuntimeSelection;
   task: string;
   input: Record<string, unknown>;
   lastEventSeq: number;
@@ -79,15 +89,156 @@ export interface CreateAndWaitRequest extends CreateRunRequest {
   onEvent?: (event: RunEvent) => void;
 }
 
-export class AgentRouter {
-  readonly runs: RunsClient;
+export interface CodexRuntimeOptions {
+  mode?: CodexRuntimeMode;
+  model?: string;
+}
+
+export interface ClaudeCodeRuntimeOptions {
+  permissionMode?: ClaudeCodePermissionMode;
+  model?: string;
+}
+
+export interface AgentRouterClient {
+  createRun(input: CreateRunRequest): Promise<Run>;
+  listRuns(query?: { status?: string; limit?: number }): Promise<{ items: Run[] }>;
+  getRun(runId: string): Promise<Run>;
+  getRunSession(runId: string): Promise<RunSession>;
+  listRunEvents(
+    runId: string,
+    query?: { afterSeq?: number; limit?: number }
+  ): Promise<{ items: RunEvent[]; nextAfterSeq: number }>;
+  cancelRun(runId: string): Promise<Run>;
+  listRunArtifacts(runId: string): Promise<{ items: Artifact[] }>;
+  downloadArtifact(runId: string, artifactId: string): Promise<ArrayBuffer>;
+  streamRun(runId: string, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
+  createRunAndWait(input: CreateAndWaitRequest): Promise<RunSession>;
+}
+
+export interface RunAgentCreateRequest extends CreateAndWaitRequest {
+  client: AgentRouterClient;
+  sessionId?: never;
+}
+
+export interface RunAgentResumeRequest {
+  client: AgentRouterClient;
+  sessionId: string;
+  afterSeq?: number;
+  pollIntervalMs?: number;
+  maxWaitMs?: number;
+  onEvent?: (event: RunEvent) => void;
+}
+
+export type RunAgentRequest = RunAgentCreateRequest | RunAgentResumeRequest;
+
+export interface StreamAgentRequest extends CreateRunRequest {
+  client: AgentRouterClient;
+  pollIntervalMs?: number;
+  maxWaitMs?: number;
+}
+
+export interface AgentRunStream {
+  run: Run;
+  events: AsyncGenerator<RunEvent>;
+  finalSession: Promise<RunSession>;
+}
+
+export function agentrouter(options: AgentRouterOptions): AgentRouterClient {
+  return new AgentRouterClientImpl(options);
+}
+
+export function codex(options: CodexRuntimeOptions = {}): CodexRuntimeSelection {
+  return { kind: "codex", ...options };
+}
+
+export function claudeCode(options: ClaudeCodeRuntimeOptions = {}): ClaudeCodeRuntimeSelection {
+  return { kind: "claude_code", ...options };
+}
+
+export async function runAgent(input: RunAgentRequest): Promise<RunSession> {
+  if (isRunAgentResumeRequest(input)) {
+    const { client, sessionId, afterSeq, pollIntervalMs, maxWaitMs, onEvent } = input;
+    return waitForRunSession(client, sessionId, { afterSeq, pollIntervalMs, maxWaitMs, onEvent });
+  }
+
+  if (isRunAgentCreateRequest(input)) {
+    const { client, ...request } = input;
+    return client.createRunAndWait(request);
+  }
+
+  throw new AgentRouterError("invalid_run_agent_request", "runAgent requires either task or sessionId");
+}
+
+function isRunAgentResumeRequest(input: RunAgentRequest): input is RunAgentResumeRequest {
+  return "sessionId" in input && typeof input.sessionId === "string" && input.sessionId.length > 0;
+}
+
+function isRunAgentCreateRequest(input: RunAgentRequest): input is RunAgentCreateRequest {
+  return "task" in input && typeof input.task === "string";
+}
+
+export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunStream> {
+  const { client, pollIntervalMs, maxWaitMs, ...request } = input;
+  const run = await client.createRun(request);
+  return {
+    run,
+    events: streamRunEventsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
+    finalSession: waitForRunSession(client, run.id, { pollIntervalMs, maxWaitMs })
+  };
+}
+
+class AgentRouterClientImpl implements AgentRouterClient {
+  private readonly http: AgentRouterHttpClient;
 
   constructor(options: AgentRouterOptions) {
-    this.runs = new RunsClient(options);
+    this.http = new AgentRouterHttpClient(options);
+  }
+
+  async createRun(input: CreateRunRequest): Promise<Run> {
+    return this.http.create(input);
+  }
+
+  async listRuns(query: { status?: string; limit?: number } = {}): Promise<{ items: Run[] }> {
+    return this.http.list(query);
+  }
+
+  async getRun(runId: string): Promise<Run> {
+    return this.http.get(runId);
+  }
+
+  async getRunSession(runId: string): Promise<RunSession> {
+    return this.http.session(runId);
+  }
+
+  async listRunEvents(
+    runId: string,
+    query: { afterSeq?: number; limit?: number } = {}
+  ): Promise<{ items: RunEvent[]; nextAfterSeq: number }> {
+    return this.http.events(runId, query);
+  }
+
+  async cancelRun(runId: string): Promise<Run> {
+    return this.http.cancel(runId);
+  }
+
+  async listRunArtifacts(runId: string): Promise<{ items: Artifact[] }> {
+    return this.http.artifacts(runId);
+  }
+
+  async downloadArtifact(runId: string, artifactId: string): Promise<ArrayBuffer> {
+    return this.http.downloadArtifact(runId, artifactId);
+  }
+
+  streamRun(runId: string, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
+    return this.http.stream(runId, options);
+  }
+
+  async createRunAndWait(input: CreateAndWaitRequest): Promise<RunSession> {
+    return this.http.createAndWait(input);
   }
 }
 
-export class RunsClient {
+class AgentRouterHttpClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly fetchImpl: typeof fetch;
@@ -241,6 +392,75 @@ export class AgentRouterError extends Error {
     readonly statusCode?: number
   ) {
     super(message);
+  }
+}
+
+async function waitForRunSession(
+  client: AgentRouterClient,
+  runId: string,
+  options: {
+    afterSeq?: number;
+    pollIntervalMs?: number;
+    maxWaitMs?: number;
+    onEvent?: (event: RunEvent) => void;
+  } = {}
+): Promise<RunSession> {
+  const { pollIntervalMs = 1000, maxWaitMs = 10 * 60 * 1000, onEvent } = options;
+  let afterSeq = options.afterSeq ?? 0;
+  const startedAt = Date.now();
+
+  for (;;) {
+    const eventPage = await client.listRunEvents(runId, { afterSeq, limit: 500 });
+    for (const event of eventPage.items) {
+      afterSeq = event.sequence;
+      onEvent?.(event);
+    }
+
+    const current = await client.getRun(runId);
+    if (["completed", "failed", "cancelled"].includes(current.status)) {
+      return client.getRunSession(runId);
+    }
+
+    if (Date.now() - startedAt >= maxWaitMs) {
+      throw new AgentRouterError("wait_timeout", "Run did not reach a terminal state before maxWaitMs", {
+        runId,
+        status: current.status
+      });
+    }
+
+    await sleep(pollIntervalMs);
+  }
+}
+
+async function* streamRunEventsUntilTerminal(
+  client: AgentRouterClient,
+  runId: string,
+  options: { pollIntervalMs?: number; maxWaitMs?: number } = {}
+): AsyncGenerator<RunEvent> {
+  const { pollIntervalMs = 1000, maxWaitMs = 10 * 60 * 1000 } = options;
+  let afterSeq = 0;
+  const startedAt = Date.now();
+
+  for (;;) {
+    const eventPage = await client.listRunEvents(runId, { afterSeq, limit: 500 });
+    for (const event of eventPage.items) {
+      afterSeq = event.sequence;
+      yield event;
+    }
+
+    const current = await client.getRun(runId);
+    if (["completed", "failed", "cancelled"].includes(current.status)) {
+      return;
+    }
+
+    if (Date.now() - startedAt >= maxWaitMs) {
+      throw new AgentRouterError("wait_timeout", "Run did not reach a terminal state before maxWaitMs", {
+        runId,
+        status: current.status
+      });
+    }
+
+    await sleep(pollIntervalMs);
   }
 }
 

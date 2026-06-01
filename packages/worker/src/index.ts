@@ -4,6 +4,7 @@ import type { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import { buildProviderProcessEnv, scanForCredentialCanaries } from "@agentrouter/credential-boundary";
 import {
   RunRepository,
+  isCodexRunRecord,
   type RunRecord,
   withSearchPath
 } from "@agentrouter/db";
@@ -99,11 +100,6 @@ async function executeClaimedRun(
   input: RunOneWorkerIterationInput,
   run: RunRecord
 ): Promise<void> {
-  const credentialBoundary = buildProviderProcessEnv({
-    provider: "codex",
-    rawProviderKey: input.codexApiKey,
-    baseEnv: input.baseEnv
-  });
   const attemptId = `attempt_${randomUUID()}`;
   const sandboxName = `${input.testResourcePrefix}-${run.id}`;
   let sandboxId: string | undefined;
@@ -111,12 +107,23 @@ async function executeClaimedRun(
   let stderr = "";
 
   try {
+    if (!isCodexRunRecord(run)) {
+      throw new Error(`Unsupported runtime kind for Phase 1A worker: ${run.runtimeKind}`);
+    }
+
+    const credentialBoundary = buildProviderProcessEnv({
+      provider: "codex",
+      rawProviderKey: input.codexApiKey,
+      baseEnv: input.baseEnv
+    });
+
     const launchPlan = buildCodexLaunchPlan({
       mode: run.runtimeMode,
+      model: run.runtimeModel,
       task: taskFromRun(run),
       workdir: repoDir,
       providerEnv: credentialBoundary.providerEnv,
-      reviewBase: reviewBaseFromRun(run)
+      reviewBase: undefined
     });
 
     await withClient(input, async (client) => {
@@ -128,6 +135,7 @@ async function executeClaimedRun(
         workerId: input.workerId,
         runtimeKind: run.runtimeKind,
         runtimeMode: run.runtimeMode,
+        runtimeModel: run.runtimeModel,
         permissionProfile: { ...launchPlan.permissionProfile },
         credentialStrategy: credentialBoundary.credentialStrategy
       });
@@ -159,7 +167,7 @@ async function executeClaimedRun(
       await repo.updateRunStatus(run.id, "running");
     });
 
-    await requireSuccessfulCommand("source_setup", setupSource(input.sandbox, sandbox.id, run));
+    await requireSuccessfulCommand("workspace_setup", setupScratchWorkspace(input.sandbox, sandbox.id));
     await ensureCodex(input.sandbox, sandbox.id);
 
     const command = shellCommand(launchPlan.command, launchPlan.argv);
@@ -206,21 +214,10 @@ async function executeClaimedRun(
   }
 }
 
-async function setupSource(
+async function setupScratchWorkspace(
   sandbox: WorkerSandboxDriver,
-  sandboxId: string,
-  run: RunRecord
+  sandboxId: string
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const source = sourceFromRun(run);
-  if (source.type === "git" && source.repoUrl) {
-    const branch = source.branch ? ["--branch", source.branch].map(shellQuote).join(" ") : "";
-    return sandbox.executeCommand(
-      sandboxId,
-      `rm -rf ${shellQuote(repoDir)} && git clone --depth 1 ${branch} ${shellQuote(source.repoUrl)} ${shellQuote(repoDir)}`,
-      { timeoutSeconds: 0 }
-    );
-  }
-
   return sandbox.executeCommand(
     sandboxId,
     [
@@ -454,6 +451,7 @@ async function recordSessionManifest(
         status: run?.status,
         runtimeKind: run?.runtimeKind,
         runtimeMode: run?.runtimeMode,
+        runtimeModel: run?.runtimeModel,
         lastEventSeq: run ? Number(run.lastEventSeq) : 0
       },
       events: events.map((event) => ({
@@ -533,34 +531,6 @@ async function withClient<T>(
 function taskFromRun(run: RunRecord): string {
   const task = run.input.task;
   return typeof task === "string" ? task : run.promptSummary;
-}
-
-function sourceFromRun(run: RunRecord): {
-  type: "git" | "scratch";
-  repoUrl?: string;
-  branch?: string;
-} {
-  const source = run.input.source;
-  if (source && typeof source === "object" && !Array.isArray(source)) {
-    const record = source as Record<string, unknown>;
-    return {
-      type: record.type === "git" ? "git" : "scratch",
-      repoUrl: typeof record.repoUrl === "string" ? record.repoUrl : undefined,
-      branch: typeof record.branch === "string" ? record.branch : undefined
-    };
-  }
-
-  return { type: "scratch" };
-}
-
-function reviewBaseFromRun(run: RunRecord): string | undefined {
-  const source = run.input.source;
-  if (source && typeof source === "object" && !Array.isArray(source)) {
-    const baseRef = (source as Record<string, unknown>).baseRef;
-    return typeof baseRef === "string" ? baseRef : undefined;
-  }
-
-  return undefined;
 }
 
 function shellCommand(command: string, argv: string[]): string {

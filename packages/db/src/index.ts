@@ -3,8 +3,10 @@ import {
   normalizeEventPayload,
   transitionRunStatus,
   type ArtifactRef,
+  type CodexRuntimeMode,
+  type RuntimeModel,
   type RuntimeKind,
-  type RuntimeMode,
+  type RuntimePermissionValue,
   type RunStatus
 } from "@agentrouter/core";
 
@@ -14,6 +16,14 @@ export function quoteIdent(value: string): string {
   }
 
   return `"${value.replaceAll('"', '""')}"`;
+}
+
+export function quoteLiteral(value: string): string {
+  if (value.includes("\0")) {
+    throw new Error(`Invalid SQL literal: ${value}`);
+  }
+
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 export async function withSearchPath<T>(
@@ -43,7 +53,13 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
       create table if not exists runs (
         id text primary key,
         runtime_kind text not null check (runtime_kind in ('codex', 'claude_code')),
-        runtime_mode text not null check (runtime_mode in ('default', 'read_only', 'full_access', 'auto_review')),
+        runtime_mode text not null,
+        runtime_model text,
+        constraint runs_runtime_kind_mode_check check (
+          (runtime_kind = 'codex' and runtime_mode in ('default', 'read_only', 'full_access', 'auto_review'))
+          or
+          (runtime_kind = 'claude_code' and runtime_mode in ('default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'))
+        ),
         status text not null default 'queued'
           check (status in ('queued', 'starting', 'running', 'cancelling', 'cancelled', 'completed', 'failed')),
         input_json jsonb not null default '{}'::jsonb,
@@ -86,7 +102,13 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
         attempt_number integer not null,
         worker_id text references workers(id),
         runtime_kind text not null check (runtime_kind in ('codex', 'claude_code')),
-        runtime_mode text not null check (runtime_mode in ('default', 'read_only', 'full_access', 'auto_review')),
+        runtime_mode text not null,
+        runtime_model text,
+        constraint run_attempts_runtime_kind_mode_check check (
+          (runtime_kind = 'codex' and runtime_mode in ('default', 'read_only', 'full_access', 'auto_review'))
+          or
+          (runtime_kind = 'claude_code' and runtime_mode in ('default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'))
+        ),
         permission_profile_json jsonb not null default '{}'::jsonb,
         credential_strategy text not null check (credential_strategy in ('provider_proxy', 'direct_env_proven')),
         cli_version text,
@@ -192,13 +214,58 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
     await client.query("create index if not exists runs_status_queued_idx on runs(status, queued_at)");
     await client.query("create index if not exists run_events_created_at_idx on run_events(created_at desc)");
     await client.query("create index if not exists artifacts_run_id_idx on artifacts(run_id)");
+    await client.query("alter table runs add column if not exists runtime_model text");
+    await client.query("alter table run_attempts add column if not exists runtime_model text");
+    await client.query("alter table runs drop constraint if exists runs_runtime_mode_check");
+    await client.query("alter table runs drop constraint if exists runs_check");
+    await client.query(
+      "alter table run_attempts drop constraint if exists run_attempts_runtime_mode_check"
+    );
+    await client.query("alter table run_attempts drop constraint if exists run_attempts_check");
+    await addRuntimeModeConstraint(
+      client,
+      "runs",
+      "runs_runtime_kind_mode_check"
+    );
+    await addRuntimeModeConstraint(
+      client,
+      "run_attempts",
+      "run_attempts_runtime_kind_mode_check"
+    );
   });
+}
+
+async function addRuntimeModeConstraint(
+  client: PoolClient,
+  tableName: string,
+  constraintName: string
+): Promise<void> {
+  await client.query(`
+    do $$
+    begin
+      if not exists (
+        select 1
+        from pg_constraint
+        where conname = ${quoteLiteral(constraintName)} and conrelid = ${quoteLiteral(tableName)}::regclass
+      ) then
+        alter table ${quoteIdent(tableName)}
+        add constraint ${quoteIdent(constraintName)}
+        check (
+          (runtime_kind = 'codex' and runtime_mode in ('default', 'read_only', 'full_access', 'auto_review'))
+          or
+          (runtime_kind = 'claude_code' and runtime_mode in ('default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'))
+        );
+      end if;
+    end
+    $$;
+  `);
 }
 
 export interface CreateRunInput {
   id: string;
   runtimeKind: RuntimeKind;
-  runtimeMode: RuntimeMode;
+  runtimeMode: RuntimePermissionValue;
+  runtimeModel?: RuntimeModel;
   input: Record<string, unknown>;
   promptSummary: string;
 }
@@ -206,7 +273,8 @@ export interface CreateRunInput {
 export interface RunRecord {
   id: string;
   runtimeKind: RuntimeKind;
-  runtimeMode: RuntimeMode;
+  runtimeMode: RuntimePermissionValue;
+  runtimeModel?: RuntimeModel;
   status: RunStatus;
   lastEventSeq: bigint;
   input: Record<string, unknown>;
@@ -217,6 +285,18 @@ export interface RunRecord {
   cancelRequestedAt?: Date;
   failureCode?: string;
   failureReason?: string;
+}
+
+export interface CodexRunRecord extends RunRecord {
+  runtimeKind: "codex";
+  runtimeMode: CodexRuntimeMode;
+}
+
+export function isCodexRunRecord(run: RunRecord): run is CodexRunRecord {
+  return (
+    run.runtimeKind === "codex" &&
+    ["default", "read_only", "full_access", "auto_review"].includes(run.runtimeMode)
+  );
 }
 
 export interface AppendEventInput {
@@ -271,7 +351,8 @@ export interface RunAttemptInput {
   attemptNumber: number;
   workerId: string;
   runtimeKind: RuntimeKind;
-  runtimeMode: RuntimeMode;
+  runtimeMode: RuntimePermissionValue;
+  runtimeModel?: RuntimeModel;
   permissionProfile: Record<string, unknown>;
   credentialStrategy: "provider_proxy" | "direct_env_proven";
   cliVersion?: string;
@@ -284,14 +365,15 @@ export class RunRepository {
   async createRun(input: CreateRunInput): Promise<RunRecord> {
     const result = await this.client.query(
       `
-        insert into runs (id, runtime_kind, runtime_mode, input_json, prompt_summary)
-        values ($1, $2, $3, $4::jsonb, $5)
+        insert into runs (id, runtime_kind, runtime_mode, runtime_model, input_json, prompt_summary)
+        values ($1, $2, $3, $4, $5::jsonb, $6)
         returning *
       `,
       [
         input.id,
         input.runtimeKind,
         input.runtimeMode,
+        input.runtimeModel,
         JSON.stringify(input.input),
         input.promptSummary
       ]
@@ -437,10 +519,10 @@ export class RunRepository {
     await this.client.query(
       `
         insert into run_attempts (
-          id, run_id, attempt_number, worker_id, runtime_kind, runtime_mode,
+          id, run_id, attempt_number, worker_id, runtime_kind, runtime_mode, runtime_model,
           permission_profile_json, credential_strategy, cli_version, provider_session_json
         )
-        values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb)
+        values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb)
       `,
       [
         input.id,
@@ -449,6 +531,7 @@ export class RunRepository {
         input.workerId,
         input.runtimeKind,
         input.runtimeMode,
+        input.runtimeModel,
         JSON.stringify(input.permissionProfile),
         input.credentialStrategy,
         input.cliVersion,
@@ -616,7 +699,8 @@ function mapRun(row: Record<string, unknown>): RunRecord {
   return {
     id: String(row.id),
     runtimeKind: row.runtime_kind as RuntimeKind,
-    runtimeMode: row.runtime_mode as RuntimeMode,
+    runtimeMode: row.runtime_mode as RuntimePermissionValue,
+    runtimeModel: optionalString(row.runtime_model),
     status: row.status as RunStatus,
     lastEventSeq: BigInt(String(row.last_event_seq)),
     input: asRecord(row.input_json),

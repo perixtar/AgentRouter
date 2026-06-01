@@ -1,7 +1,7 @@
-import type { RuntimeMode } from "@agentrouter/core";
+import type { CodexRuntimeMode } from "@agentrouter/core";
 
 export interface CodexPermissionProfile {
-  mode: RuntimeMode;
+  mode: CodexRuntimeMode;
   sandbox: "workspace-write" | "read-only" | "danger-full-access";
   askForApproval: "never";
   command: "exec" | "review";
@@ -14,7 +14,8 @@ export interface ResolveCodexOptions {
 }
 
 export interface CodexLaunchPlanInput {
-  mode: RuntimeMode;
+  mode: CodexRuntimeMode;
+  model?: string;
   task: string;
   workdir: string;
   providerEnv: Record<string, string>;
@@ -37,7 +38,7 @@ const forbiddenRawArgs = new Set([
 ]);
 
 export function resolveCodexPermissionProfile(
-  mode: RuntimeMode,
+  mode: CodexRuntimeMode,
   options: ResolveCodexOptions = {}
 ): CodexPermissionProfile {
   assertNoRawPermissionOverrides(options.rawArgs ?? []);
@@ -58,7 +59,7 @@ export function resolveCodexPermissionProfile(
 }
 
 function profile(
-  mode: RuntimeMode,
+  mode: CodexRuntimeMode,
   sandbox: CodexPermissionProfile["sandbox"],
   command: CodexPermissionProfile["command"],
   requiresDaytonaIsolation: boolean
@@ -90,6 +91,7 @@ export function buildCodexLaunchPlan(input: CodexLaunchPlanInput): CodexLaunchPl
     permissionProfile.sandbox,
     "--cd",
     input.workdir,
+    ...modelArgs(input.model),
     "exec",
     ...execArgs(permissionProfile, input),
     ...reviewArgs(input),
@@ -107,6 +109,11 @@ export function buildCodexLaunchPlan(input: CodexLaunchPlanInput): CodexLaunchPl
     cwd: input.workdir,
     permissionProfile
   };
+}
+
+function modelArgs(model: string | undefined): string[] {
+  const trimmed = model?.trim();
+  return trimmed ? ["--model", trimmed] : [];
 }
 
 function execArgs(

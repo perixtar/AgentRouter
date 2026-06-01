@@ -1,5 +1,14 @@
 export type RuntimeKind = "codex" | "claude_code";
-export type RuntimeMode = "default" | "read_only" | "full_access" | "auto_review";
+export type CodexRuntimeMode = "default" | "read_only" | "full_access" | "auto_review";
+export type ClaudeCodePermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "plan"
+  | "auto"
+  | "dontAsk"
+  | "bypassPermissions";
+export type RuntimeModel = string;
+export type RuntimePermissionValue = CodexRuntimeMode | ClaudeCodePermissionMode;
 
 export type RunStatus =
   | "queued"

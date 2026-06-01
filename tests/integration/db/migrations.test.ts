@@ -7,6 +7,7 @@ import {
   applyPhase1Migrations,
   dropSchema,
   quoteIdent,
+  quoteLiteral,
   withSearchPath
 } from "@agentrouter/db";
 import { parseAgentRouterEnv } from "@agentrouter/config";
@@ -22,6 +23,7 @@ describe("Phase 1 Postgres migrations", () => {
 
     try {
       await applyPhase1Migrations(client, schema);
+      await applyPhase1Migrations(client, schema);
       await withSearchPath(client, schema, async () => {
         const columns = await client.query(
           `
@@ -35,17 +37,65 @@ describe("Phase 1 Postgres migrations", () => {
 
         expect(columns.rows.map((row) => row.column_name)).toContain("payload_size_bytes");
         expect(columns.rows.map((row) => row.column_name)).toContain("artifact_ref_json");
+        const runConstraints = await client.query(
+          `
+            select conname
+            from pg_constraint
+            where conrelid = 'runs'::regclass and contype = 'c'
+          `
+        );
+        const attemptConstraints = await client.query(
+          `
+            select conname
+            from pg_constraint
+            where conrelid = 'run_attempts'::regclass and contype = 'c'
+          `
+        );
+
+        expect(runConstraints.rows.map((row) => row.conname)).toContain(
+          "runs_runtime_kind_mode_check"
+        );
+        expect(attemptConstraints.rows.map((row) => row.conname)).toContain(
+          "run_attempts_runtime_kind_mode_check"
+        );
 
         const repo = new RunRepository(client);
         const run = await repo.createRun({
           id: `run_${randomUUID()}`,
           runtimeKind: "codex",
           runtimeMode: "default",
+          runtimeModel: "gpt-4o",
           input: { task: "hello" },
           promptSummary: "hello"
         });
 
         expect(run.status).toBe("queued");
+        expect(run.runtimeModel).toBe("gpt-4o");
+
+        await expect(
+          repo.createRun({
+            id: `run_${randomUUID()}`,
+            runtimeKind: "claude_code",
+            runtimeMode: "acceptEdits",
+            runtimeModel: "claude-sonnet-4-6",
+            input: { task: "hello from claude" },
+            promptSummary: "hello from claude"
+          })
+        ).resolves.toMatchObject({
+          runtimeKind: "claude_code",
+          runtimeMode: "acceptEdits",
+          runtimeModel: "claude-sonnet-4-6"
+        });
+
+        await expect(
+          repo.createRun({
+            id: `run_${randomUUID()}`,
+            runtimeKind: "claude_code",
+            runtimeMode: "full_access",
+            input: { task: "invalid" },
+            promptSummary: "invalid"
+          })
+        ).rejects.toThrow();
 
         const event = await repo.appendEvent({
           runId: run.id,
@@ -77,5 +127,6 @@ describe("Phase 1 Postgres migrations", () => {
     }
 
     expect(quoteIdent(schema)).toBe(`"${schema}"`);
+    expect(quoteLiteral("agent's model")).toBe("'agent''s model'");
   });
 });

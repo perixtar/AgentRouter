@@ -18,8 +18,6 @@ export interface AgentRouterConfig {
   heartbeatIntervalSeconds: number;
   staleHeartbeatGraceSeconds: number;
   daytonaSandboxTtlSeconds: number;
-  e2eRepoUrl?: string;
-  e2eRepoBaseRef: string;
 }
 
 const envSchema = z.object({
@@ -38,9 +36,7 @@ const envSchema = z.object({
   AGENTROUTER_TEST_RESOURCE_PREFIX: z.string().min(1),
   AGENTROUTER_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().positive(),
   AGENTROUTER_STALE_HEARTBEAT_GRACE_SECONDS: z.coerce.number().int().positive(),
-  DAYTONA_SANDBOX_TTL_SECONDS: z.coerce.number().int().positive(),
-  AGENTROUTER_E2E_REPO_URL: z.string().url().optional(),
-  AGENTROUTER_E2E_REPO_BASE_REF: z.string().min(1).default("main")
+  DAYTONA_SANDBOX_TTL_SECONDS: z.coerce.number().int().positive()
 });
 
 export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig {
@@ -68,9 +64,7 @@ export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig
     testResourcePrefix: parsed.AGENTROUTER_TEST_RESOURCE_PREFIX,
     heartbeatIntervalSeconds: parsed.AGENTROUTER_HEARTBEAT_INTERVAL_SECONDS,
     staleHeartbeatGraceSeconds: parsed.AGENTROUTER_STALE_HEARTBEAT_GRACE_SECONDS,
-    daytonaSandboxTtlSeconds: parsed.DAYTONA_SANDBOX_TTL_SECONDS,
-    e2eRepoUrl: parsed.AGENTROUTER_E2E_REPO_URL,
-    e2eRepoBaseRef: parsed.AGENTROUTER_E2E_REPO_BASE_REF
+    daytonaSandboxTtlSeconds: parsed.DAYTONA_SANDBOX_TTL_SECONDS
   };
 }
 

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
-import { AgentRouter } from "@agentrouter/sdk";
+import { agentrouter, codex } from "@agentrouter/sdk";
 import { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
@@ -60,12 +60,12 @@ describeRealE2E("real Codex API + worker E2E", () => {
   });
 
   it("creates a run through the SDK and completes it through a real Daytona sandbox and Codex CLI", async () => {
-    const sdk = new AgentRouter({ baseUrl, apiKey: config.apiKey });
-    const run = await sdk.runs.create({
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+    const runtimeModel = process.env.AGENTROUTER_MODEL;
+    const run = await sdk.createRun({
       task:
         "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CODEX_E2E_OK\\n' > reports/agent-smoke.txt. Then summarize the change in one sentence.",
-      runtime: { kind: "codex", mode: "full_access" },
-      source: { type: "scratch" }
+      runtime: codex({ mode: "full_access", ...(runtimeModel ? { model: runtimeModel } : {}) })
     });
     runId = run.id;
 
@@ -85,7 +85,7 @@ describeRealE2E("real Codex API + worker E2E", () => {
 
     expect(result).toEqual({ processed: true, runId });
 
-    const session = await sdk.runs.session(runId);
+    const session = await sdk.getRunSession(runId);
     expect(session.run.status).toBe("completed");
     expect(session.artifactManifest.status).toBe("available");
     expect(session.artifacts.items.map((artifact) => artifact.kind)).toContain("workspace_file_index");
@@ -93,7 +93,7 @@ describeRealE2E("real Codex API + worker E2E", () => {
 
     const patch = session.artifacts.items.find((artifact) => artifact.kind === "workspace_patch");
     expect(patch).toBeDefined();
-    const patchBytes = await sdk.runs.downloadArtifact(runId, patch!.id);
+    const patchBytes = await sdk.downloadArtifact(runId, patch!.id);
     expect(Buffer.from(patchBytes).toString("utf8")).toContain("AR_CODEX_E2E_OK");
   }, 600_000);
 });

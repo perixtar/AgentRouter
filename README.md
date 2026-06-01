@@ -31,8 +31,7 @@ curl -sS http://127.0.0.1:8787/v1/runs \
   -H "Content-Type: application/json" \
   -d '{
     "task": "Reply exactly AR_CODEX_OK",
-    "runtime": { "kind": "codex", "mode": "default" },
-    "source": { "type": "scratch" }
+    "runtime": { "kind": "codex", "mode": "default", "model": "gpt-4o" }
   }'
 ```
 

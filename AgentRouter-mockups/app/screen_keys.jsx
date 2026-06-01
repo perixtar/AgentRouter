@@ -49,49 +49,43 @@ function CodeBlock({ code, lang, filename }) {
 const SNIPPETS = {
   Node: {
     filename: "run-agent.ts",
-    code: `import { AgentRouter } from "@agentrouter/sdk";
+    code: `import { agentrouter, codex, runAgent } from "@agentrouter/sdk";
 
-const ar = new AgentRouter({ apiKey: process.env.AGENTROUTER_KEY });
+const ar = agentrouter({ apiKey: process.env.AGENTROUTER_KEY });
 
 // Run an agent and stream every step back
-const run = await ar.agents.run("support-triage", {
-  input: { ticket_id: 48213 },
-  // risky tool calls pause for approval instead of failing
-  onApproval: "pause",
+const session = await runAgent({
+  client: ar,
+  task: "Create reports/agent-smoke.txt with a short status note",
+  runtime: codex({ mode: "default" }),
 });
 
-for await (const step of run.stream()) {
-  console.log(step.type, step.label, step.status);
-}
-
-console.log("run", run.id, "→", run.status);`,
+console.log("run", session.run.id, "→", session.run.status);`,
   },
   Python: {
     filename: "run_agent.py",
-    code: `from agentrouter import AgentRouter
+    code: `import os
+import requests
 
-ar = AgentRouter(api_key=os.environ["AGENTROUTER_KEY"])
-
-# Run an agent and stream every step back
-run = ar.agents.run(
-    "support-triage",
-    input={"ticket_id": 48213},
-    on_approval="pause",  # risky calls wait for a human
+response = requests.post(
+    "https://api.agentrouter.dev/v1/runs",
+    headers={"Authorization": f"Bearer {os.environ['AGENTROUTER_KEY']}"},
+    json={
+        "task": "Create reports/agent-smoke.txt with a short status note",
+        "runtime": {"kind": "codex", "mode": "default"},
+    },
 )
 
-for step in run.stream():
-    print(step.type, step.label, step.status)
-
-print("run", run.id, "->", run.status)`,
+print("run", response.json()["id"], "->", response.json()["status"])`,
   },
   cURL: {
     filename: "terminal",
-    code: `curl https://api.agentrouter.dev/v1/agents/support-triage/runs \\
+    code: `curl https://api.agentrouter.dev/v1/runs \\
   -H "Authorization: Bearer $AGENTROUTER_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "input": { "ticket_id": 48213 },
-    "on_approval": "pause"
+    "task": "Create reports/agent-smoke.txt with a short status note",
+    "runtime": { "kind": "codex", "mode": "default" }
   }'`,
   },
 };
@@ -99,7 +93,7 @@ print("run", run.id, "->", run.status)`,
 /* ── terminal output that "streams" ─────────────────────────────── */
 const TERMINAL_LINES = [
   { t: "cmd", s: "$ npx tsx run-agent.ts" },
-  { t: "dim", s: "→ POST /v1/agents/support-triage/runs" },
+  { t: "dim", s: "→ POST /v1/runs" },
   { t: "ok", s: "✓ run_a91f4c started · streaming" },
   { t: "step", s: "input   Run started" },
   { t: "step", s: "model   Model reasoning            1.9s" },

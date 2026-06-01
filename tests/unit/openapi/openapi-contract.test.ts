@@ -22,7 +22,25 @@ describe("OpenAPI Phase 1 contract", () => {
   it("keeps runtime kinds and modes explicit", () => {
     expect(spec).toContain("codex");
     expect(spec).toContain("claude_code");
+    expect(spec).toContain("CodexRuntimeMode");
+    expect(spec).toContain("ClaudeCodePermissionMode");
+    expect(spec).toContain("RuntimeModel");
+    expect(spec).toContain("ResolvedRuntimeSelection");
     expect(spec).toContain("full_access");
     expect(spec).toContain("auto_review");
+    expect(spec).toContain("acceptEdits");
+    expect(spec).toContain("bypassPermissions");
+    expect(spec).toContain("model:");
+    expect(spec).toMatch(
+      /CreateRunRequest:[\s\S]*?runtime:\n\s+\$ref: "#\/components\/schemas\/RuntimeSelection"/
+    );
+    expect(spec).toMatch(
+      /Run:[\s\S]*?runtime:\n\s+\$ref: "#\/components\/schemas\/ResolvedRuntimeSelection"/
+    );
+  });
+
+  it("does not expose workspace attachment in the Phase 1 create-run contract", () => {
+    expect(spec).not.toContain("repoUrl");
+    expect(spec).not.toContain("baseRef");
   });
 });

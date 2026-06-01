@@ -23,5 +23,5 @@
       "@agentrouter/sdk": ["packages/sdk-typescript/src/index.ts"]
     }
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts"]
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"]
 }

@@ -33,10 +33,10 @@ describe("worker run-one orchestration", () => {
           id: runId,
           runtimeKind: "codex",
           runtimeMode: "default",
+          runtimeModel: "gpt-4o",
           input: {
             task: "Create reports/agent-smoke.txt and summarize the change",
-            runtime: { kind: "codex", mode: "default" },
-            source: { type: "scratch" }
+            runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
           },
           promptSummary: "Create reports/agent-smoke.txt and summarize the change"
         });
@@ -73,6 +73,9 @@ describe("worker run-one orchestration", () => {
     expect(sandbox.createdEnvSnapshots[0]).not.toHaveProperty("CODEX_API_KEY");
     expect(sandbox.createdEnvSnapshots[0]).not.toHaveProperty("OPENAI_API_KEY");
     expect(sandbox.commands.some((command) => command.includes("codex"))).toBe(true);
+    expect(sandbox.commands.find((command) => command.includes("'exec'"))).toContain(
+      "'--model' 'gpt-4o'"
+    );
     expect(sandbox.commands.join("\n")).not.toContain(config.codexApiKey);
     expect(sandbox.deletedSandboxIds).toEqual(["sandbox_1"]);
 

@@ -60,11 +60,6 @@ describe("AgentRouter API", () => {
     const idempotencyKey = `idem_${randomUUID()}`;
     const payload = {
       task: "Create reports/agent-smoke.txt and summarize the change",
-      source: {
-        type: "git",
-        repoUrl: "https://github.com/octocat/Hello-World.git",
-        branch: "master"
-      },
       runtime: { kind: "codex", mode: "default" }
     };
 
@@ -163,6 +158,66 @@ describe("AgentRouter API", () => {
     });
   });
 
+  it("creates a Codex run with an explicit provider model", async () => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      status: "queued",
+      runtime: { kind: "codex", mode: "default", model: "gpt-4o" },
+      input: {
+        runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
+      }
+    });
+  });
+
+  it("rejects unsafe runtime model strings", async () => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        runtime: { kind: "codex", mode: "default", model: "gpt-4o;rm -rf /" }
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: "validation_error"
+      }
+    });
+  });
+
+  it("rejects unknown top-level run creation fields", async () => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        runtime: { kind: "codex", mode: "default" },
+        temperature: 0.2
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: "validation_error"
+      }
+    });
+  });
+
   it("rejects Phase 1B runtime requests before worker claim", async () => {
     const response = await server.inject({
       method: "POST",
@@ -170,7 +225,7 @@ describe("AgentRouter API", () => {
       headers: authHeaders(config.apiKey),
       payload: {
         task: "Inspect the repo",
-        runtime: { kind: "claude_code", mode: "default" }
+        runtime: { kind: "claude_code", permissionMode: "acceptEdits", model: "claude-sonnet-4-6" }
       }
     });
 
@@ -178,6 +233,42 @@ describe("AgentRouter API", () => {
     expect(response.json()).toMatchObject({
       error: {
         code: "unsupported_runtime_kind"
+      }
+    });
+  });
+
+  it("rejects runtime mode fields that belong to another provider", async () => {
+    const codexWithClaudePermissionMode = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        runtime: { kind: "codex", permissionMode: "acceptEdits" }
+      }
+    });
+
+    expect(codexWithClaudePermissionMode.statusCode).toBe(400);
+    expect(codexWithClaudePermissionMode.json()).toMatchObject({
+      error: {
+        code: "validation_error"
+      }
+    });
+
+    const claudeWithCodexMode = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        runtime: { kind: "claude_code", mode: "full_access" }
+      }
+    });
+
+    expect(claudeWithCodexMode.statusCode).toBe(400);
+    expect(claudeWithCodexMode.json()).toMatchObject({
+      error: {
+        code: "validation_error"
       }
     });
   });
@@ -200,6 +291,35 @@ describe("AgentRouter API", () => {
         code: "unsupported_tool_configuration"
       }
     });
+  });
+
+  it("rejects workspace attachments in Phase 1", async () => {
+    for (const payload of [
+      {
+        task: "Inspect a repo",
+        runtime: { kind: "codex", mode: "default" },
+        repoUrl: "https://github.com/octocat/Hello-World.git"
+      },
+      {
+        task: "Inspect a repo",
+        runtime: { kind: "codex", mode: "default" },
+        source: { type: "scratch" }
+      }
+    ]) {
+      const response = await server.inject({
+        method: "POST",
+        url: "/v1/runs",
+        headers: authHeaders(config.apiKey),
+        payload
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        error: {
+          code: "unsupported_workspace_attachment"
+        }
+      });
+    }
   });
 });
 

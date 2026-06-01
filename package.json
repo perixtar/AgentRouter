@@ -18,6 +18,11 @@
     "api:dev": "tsx apps/api/src/main.ts",
     "worker:run-once": "AGENTROUTER_WORKER_RUN_ONCE=1 tsx apps/worker/src/main.ts",
     "worker:dev": "tsx apps/worker/src/main.ts",
+    "example:sdk": "tsx examples/typescript-sdk-minimal.ts",
+    "example:run-agent": "tsx examples/run-agent.ts",
+    "example:stream-agent": "tsx examples/stream-agent.ts",
+    "example:create-tool": "tsx examples/tool-boundary.ts",
+    "example:tool-boundary": "tsx examples/tool-boundary.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -8,6 +8,7 @@ describe("Codex CLI argv", () => {
   it("orders global and exec flags in a shape accepted by current Codex", () => {
     const plan = buildCodexLaunchPlan({
       mode: "default",
+      model: "gpt-4o",
       task: "Summarize this repo",
       workdir: "/workspace/repo",
       providerEnv: { CODEX_API_KEY: "sk-canary" }
@@ -25,6 +26,8 @@ describe("Codex CLI argv", () => {
     expect(plan.argv.indexOf("--json")).toBeGreaterThan(plan.argv.indexOf("exec"));
     expect(plan.argv).toContain("-c");
     expect(plan.argv).toContain('shell_environment_policy.inherit="none"');
+    expect(plan.argv.at(plan.argv.indexOf("--model") + 1)).toBe("gpt-4o");
+    expect(plan.argv.indexOf("--model")).toBeLessThan(plan.argv.indexOf("exec"));
   });
 
   it("keeps full access behind the public mode resolver only", () => {

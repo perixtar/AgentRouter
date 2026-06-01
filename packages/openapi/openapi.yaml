@@ -216,9 +216,62 @@ components:
     RuntimeKind:
       type: string
       enum: [codex, claude_code]
-    RuntimeMode:
+    CodexRuntimeMode:
       type: string
       enum: [default, read_only, full_access, auto_review]
+    ClaudeCodePermissionMode:
+      type: string
+      enum: [default, acceptEdits, plan, auto, dontAsk, bypassPermissions]
+    RuntimeModel:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9._:/-]+$"
+      description: Provider model name or alias passed to the selected runtime CLI.
+    RuntimeSelection:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind]
+          properties:
+            kind:
+              const: codex
+            mode:
+              $ref: "#/components/schemas/CodexRuntimeMode"
+            model:
+              $ref: "#/components/schemas/RuntimeModel"
+        - type: object
+          additionalProperties: false
+          required: [kind]
+          properties:
+            kind:
+              const: claude_code
+            permissionMode:
+              $ref: "#/components/schemas/ClaudeCodePermissionMode"
+            model:
+              $ref: "#/components/schemas/RuntimeModel"
+    ResolvedRuntimeSelection:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, mode]
+          properties:
+            kind:
+              const: codex
+            mode:
+              $ref: "#/components/schemas/CodexRuntimeMode"
+            model:
+              $ref: "#/components/schemas/RuntimeModel"
+        - type: object
+          additionalProperties: false
+          required: [kind, permissionMode]
+          properties:
+            kind:
+              const: claude_code
+            permissionMode:
+              $ref: "#/components/schemas/ClaudeCodePermissionMode"
+            model:
+              $ref: "#/components/schemas/RuntimeModel"
     RunStatus:
       type: string
       enum: [queued, starting, running, cancelling, cancelled, completed, failed]
@@ -231,31 +284,7 @@ components:
           type: string
           minLength: 1
         runtime:
-          type: object
-          properties:
-            kind:
-              $ref: "#/components/schemas/RuntimeKind"
-            mode:
-              $ref: "#/components/schemas/RuntimeMode"
-        source:
-          oneOf:
-            - type: object
-              required: [type, repoUrl]
-              properties:
-                type:
-                  const: git
-                repoUrl:
-                  type: string
-                  format: uri
-                branch:
-                  type: string
-                baseRef:
-                  type: string
-            - type: object
-              required: [type]
-              properties:
-                type:
-                  const: scratch
+          $ref: "#/components/schemas/RuntimeSelection"
         metadata:
           type: object
           additionalProperties: true
@@ -268,13 +297,7 @@ components:
         status:
           $ref: "#/components/schemas/RunStatus"
         runtime:
-          type: object
-          required: [kind, mode]
-          properties:
-            kind:
-              $ref: "#/components/schemas/RuntimeKind"
-            mode:
-              $ref: "#/components/schemas/RuntimeMode"
+          $ref: "#/components/schemas/ResolvedRuntimeSelection"
         task:
           type: string
         input:

@@ -272,6 +272,10 @@
       grid-column: span 5;
     }
 
+    .span-6 {
+      grid-column: span 6;
+    }
+
     .span-7 {
       grid-column: span 7;
     }
@@ -502,6 +506,7 @@
 
       .span-4,
       .span-5,
+      .span-6,
       .span-7,
       .span-8,
       .span-12 {
@@ -711,8 +716,8 @@ Terminal states: completed, failed, cancelled.</pre>
               <tbody>
                 <tr>
                   <td class="mono">runs</td>
-                  <td><span class="mono">id</span>, <span class="mono">runtime_kind</span>, <span class="mono">runtime_mode</span>, <span class="mono">status</span>, <span class="mono">input_json</span>, <span class="mono">prompt_summary</span>, <span class="mono">last_event_seq</span>, timestamps, terminal failure fields</td>
-                  <td>Stores whether the run uses <span class="mono">codex</span> or <span class="mono">claude_code</span> and which AgentRouter mode was requested.</td>
+                  <td><span class="mono">id</span>, <span class="mono">runtime_kind</span>, <span class="mono">runtime_mode</span>, <span class="mono">runtime_model</span>, <span class="mono">status</span>, <span class="mono">input_json</span>, <span class="mono">prompt_summary</span>, <span class="mono">last_event_seq</span>, timestamps, terminal failure fields</td>
+                  <td>Stores whether the run uses <span class="mono">codex</span> or <span class="mono">claude_code</span>, the resolved provider-specific permission value, and the optional selected provider model.</td>
                 </tr>
                 <tr>
                   <td class="mono">idempotency_keys</td>
@@ -726,8 +731,8 @@ Terminal states: completed, failed, cancelled.</pre>
                 </tr>
                 <tr>
                   <td class="mono">run_attempts</td>
-                  <td><span class="mono">run_id</span>, <span class="mono">attempt_number</span>, <span class="mono">worker_id</span>, <span class="mono">runtime_kind</span>, <span class="mono">runtime_mode</span>, <span class="mono">permission_profile_json</span>, <span class="mono">credential_strategy</span>, <span class="mono">cli_version</span>, <span class="mono">provider_session_json</span>, <span class="mono">last_heartbeat_at</span>, exit/failure fields</td>
-                  <td>Stores one execution attempt per worker claim, including resolved permission flags and the non-secret credential strategy. Claude <span class="mono">session_id</span> and Codex thread/session ids stay metadata only.</td>
+                  <td><span class="mono">run_id</span>, <span class="mono">attempt_number</span>, <span class="mono">worker_id</span>, <span class="mono">runtime_kind</span>, <span class="mono">runtime_mode</span>, <span class="mono">runtime_model</span>, <span class="mono">permission_profile_json</span>, <span class="mono">credential_strategy</span>, <span class="mono">cli_version</span>, <span class="mono">provider_session_json</span>, <span class="mono">last_heartbeat_at</span>, exit/failure fields</td>
+                  <td>Stores one execution attempt per worker claim, including resolved permission flags, selected model, and the non-secret credential strategy. Claude <span class="mono">session_id</span> and Codex thread/session ids stay metadata only.</td>
                 </tr>
                 <tr>
                   <td class="mono">sandbox_sessions</td>
@@ -901,8 +906,6 @@ Terminal states: completed, failed, cancelled.</pre>
               <div class="env-row ok"><code>AGENTROUTER_HEARTBEAT_INTERVAL_SECONDS</code><span>How often the worker proves the run is still alive.</span><span class="env-state ok">set</span></div>
               <div class="env-row ok"><code>AGENTROUTER_STALE_HEARTBEAT_GRACE_SECONDS</code><span>How long before a silent worker is considered lost.</span><span class="env-state ok">set</span></div>
               <div class="env-row ok"><code>DAYTONA_SANDBOX_TTL_SECONDS</code><span>Initial sandbox TTL; renewed while the run is healthy.</span><span class="env-state ok">set</span></div>
-              <div class="env-row missing"><code>AGENTROUTER_E2E_REPO_URL</code><span>Public or test-only git fixture repo for real API/worker E2E runs.</span><span class="env-state missing">missing</span></div>
-              <div class="env-row ok"><code>AGENTROUTER_E2E_REPO_BASE_REF</code><span>Base ref for review and checkout E2E tests.</span><span class="env-state ok">default</span></div>
             </div>
           </div>
           <div class="card span-5">
@@ -936,7 +939,9 @@ Terminal states: completed, failed, cancelled.</pre>
             <div class="chips">
               <span class="chip ok">resource: run</span>
               <span class="chip ok">runtime.kind</span>
-              <span class="chip ok">runtime.mode</span>
+              <span class="chip ok">runtime.model</span>
+              <span class="chip ok">codex mode</span>
+              <span class="chip ok">claude permissionMode</span>
               <span class="chip ok">SSE stream</span>
               <span class="chip ok">reconnectable</span>
               <span class="chip ok">idempotent create</span>
@@ -1000,102 +1005,180 @@ Authorization: Bearer ar_...
 Idempotency-Key: client-generated-id
 
 {
-  "task": "Fix the failing checkout test",
-  "source": {
-    "type": "git",
-    "repoUrl": "https://github.com/acme/app",
-    "branch": "main"
-  },
+  "task": "Create reports/agent-smoke.txt with a short status note",
   "runtime": {
     "kind": "codex",
     "mode": "default"
   }
 }</pre>
           </div>
+          <div class="card span-12">
+            <h2>Workspace scope</h2>
+            <p>
+              Phase 1 does not expose repo URLs or workspace attachment in the public API. The worker
+              creates a fresh scratch workspace inside
+              Daytona for every run. That keeps the minimum product easy to use and avoids designing repo
+              auth, checkout policy, branch/ref validation, and baseline diff semantics before the runtime
+              path is proven.
+            </p>
+            <div class="chips">
+              <span class="chip ok">scratch workspace by default</span>
+              <span class="chip ok">no repo input in Phase 1</span>
+              <span class="chip warn">git-backed workspaces later</span>
+            </div>
+          </div>
           <div class="card span-6">
-            <h2>TypeScript SDK</h2>
-            <pre>import { AgentRouter } from "@agentrouter/sdk";
+            <h2>SDK lesson from Vercel AI SDK</h2>
+            <p>
+              Copy the shape, not the domain: make the common path a tiny top-level function,
+              make runtime selection a plain typed value, expose streams as async iterables,
+              and keep transport/auth customization as the advanced escape hatch. The generated
+              OpenAPI client remains the contract layer, not the primary developer experience.
+            </p>
+            <div class="chips">
+              <span class="chip ok">runAgent()</span>
+              <span class="chip ok">streamAgent()</span>
+              <span class="chip ok">runAgent({ sessionId })</span>
+              <span class="chip ok">codex()</span>
+              <span class="chip warn">low-level client hidden by default</span>
+            </div>
+          </div>
+          <div class="card span-6">
+            <h2>Public SDK layers</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>Layer</th>
+                  <th>Use it for</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="mono">runAgent</td>
+                  <td>Create a run or resume an existing session by <span class="mono">sessionId</span>, wait, restore session, and return artifacts.</td>
+                </tr>
+                <tr>
+                  <td class="mono">streamAgent</td>
+                  <td>Create a run and consume normalized events as an async iterable.</td>
+                </tr>
+                <tr>
+                  <td class="mono">agentrouter</td>
+                  <td>Configure base URL, bearer key, dynamic auth, custom fetch, retries, and logging.</td>
+                </tr>
+                <tr>
+                  <td class="mono">ar.*</td>
+                  <td>Advanced direct methods over the OpenAPI client, for example <span class="mono">ar.getRun</span> and <span class="mono">ar.cancelRun</span>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="card span-6">
+            <h2>Minimum TypeScript SDK</h2>
+            <pre>import { agentrouter, codex, runAgent } from "@agentrouter/sdk";
 
-const ar = new AgentRouter({
+const ar = agentrouter({
   apiKey: process.env.AGENTROUTER_API_KEY
 });
 
-const run = await ar.runs.create({
-  task: "Fix the failing checkout test",
-  runtime: { kind: "codex", mode: "default" },
-  source: {
-    type: "git",
-    repoUrl: "https://github.com/acme/app"
-  }
+const session = await runAgent({
+  client: ar,
+  task: "Create reports/agent-smoke.txt with a short status note",
+  runtime: codex({ mode: "default", model: "gpt-4o" })
 });
 
-for await (const event of ar.runs.stream(run.id)) {
-  console.log(event.type, event.message);
-}</pre>
+console.log(session.run.status);
+console.log(session.artifacts.items);</pre>
           </div>
           <div class="card span-6">
-            <h2>Convenience path</h2>
-            <pre>const result = await ar.runs.createAndWait({
-  task: "Inspect this repo and summarize risks",
-  source: {
-    type: "git",
-    repoUrl: "https://github.com/acme/app"
-  },
-  onEvent(event) {
-    console.log(event.type);
-  }
+            <h2>Streaming path</h2>
+            <pre>import { agentrouter, codex, streamAgent } from "@agentrouter/sdk";
+
+const ar = agentrouter({
+  apiKey: process.env.AGENTROUTER_API_KEY
 });
 
-console.log(result.status);
-console.log(result.artifacts);</pre>
+const stream = await streamAgent({
+  client: ar,
+  task: "Explain what a runtime worker must do during a long run",
+  runtime: codex({ mode: "read_only", model: "gpt-4o" })
+});
+
+for await (const event of stream.events) {
+  console.log(event.sequence, event.type);
+}
+
+const session = await stream.finalSession;
+console.log(session.artifactManifest.status);</pre>
+          </div>
+          <div class="card span-12">
+            <h2>Ergonomics rules</h2>
+            <ul>
+              <li>The README leads with <span class="mono">runAgent</span> and <span class="mono">streamAgent</span>, not raw REST resources.</li>
+              <li><span class="mono">codex()</span> and <span class="mono">claudeCode()</span> return provider-neutral runtime selections; they do not expose raw CLI flags.</li>
+              <li>No repo URL or workspace attachment appears in the Phase 1 public API. Every run starts in a fresh scratch workspace.</li>
+              <li><span class="mono">agentrouter()</span> is transport configuration only: base URL, API key provider, fetch implementation, retry policy, and hooks.</li>
+              <li>Git-backed workspaces move to a future explicit workspace phase with repo auth, checkout policy, branch/ref validation, and artifact baseline semantics.</li>
+              <li>The OpenAPI-backed client stays public for power users as direct <span class="mono">ar.*</span> methods in Phase 1.</li>
+              <li>Browser/framework helpers are separate packages later, for example <span class="mono">@agentrouter/react</span>; Phase 1 SDK stays server/Node-oriented.</li>
+            </ul>
           </div>
           <div class="card span-12">
             <h2>Runtime selection</h2>
             <p>
               The API and SDK choose the agent runtime per run. Phase 1A supports <span class="mono">codex</span>;
               Phase 1B adds <span class="mono">claude_code</span> against the same contract. Provider credentials
-              stay on the server; the client only selects a supported runtime kind and AgentRouter-owned mode,
-              then receives normalized run events.
+              stay on the server; the client selects a runtime-specific mode field, then receives normalized
+              run events. Codex uses AgentRouter-owned <span class="mono">mode</span> names. Claude Code uses
+              its own <span class="mono">permissionMode</span> names because its CLI permission model is not
+              the same as Codex sandboxing. Both runtimes accept optional <span class="mono">model</span>
+              strings such as <span class="mono">gpt-4o</span> or a Claude Code model alias, without exposing
+              raw provider CLI arguments.
             </p>
             <pre>type RuntimeKind = "codex" | "claude_code";
-type RuntimeMode = "default" | "read_only" | "full_access" | "auto_review";
+type CodexRuntimeMode = "default" | "read_only" | "full_access" | "auto_review";
+type ClaudeCodePermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "plan"
+  | "auto"
+  | "dontAsk"
+  | "bypassPermissions";
+type RuntimeModel = string;
 
 // Phase 1A: accepted.
-await ar.runs.create({
-  task: "Fix the failing checkout test",
-  runtime: { kind: "codex", mode: "default" },
-  source: { type: "git", repoUrl: "https://github.com/acme/app" }
+await runAgent({
+  client: ar,
+  task: "Create reports/agent-smoke.txt",
+  runtime: codex({ mode: "default", model: "gpt-4o" })
 });
 
-await ar.runs.create({
-  task: "Review the checkout flow",
-  runtime: { kind: "codex", mode: "auto_review" },
-  source: { type: "git", repoUrl: "https://github.com/acme/app" },
-  review: { base: "main", includeUncommitted: true }
+await runAgent({
+  client: ar,
+  task: "Inspect the scratch workspace and summarize what exists",
+  runtime: codex({ mode: "read_only", model: "gpt-4o" })
 });
 
 // Phase 1B: accepted after Claude Code parity lands.
-await ar.runs.create({
-  task: "Implement the failing test fix",
-  runtime: { kind: "claude_code", mode: "full_access" },
-  source: { type: "git", repoUrl: "https://github.com/acme/app" }
+await runAgent({
+  client: ar,
+  task: "Create reports/claude-smoke.txt",
+  runtime: claudeCode({ permissionMode: "bypassPermissions", model: "claude-sonnet-4-6" })
 });</pre>
             <div class="chips">
               <span class="chip ok">Codex adapter</span>
               <span class="chip warn">Claude Code parity 1B</span>
-              <span class="chip ok">mode mapping</span>
+              <span class="chip ok">runtime-specific modes</span>
               <span class="chip warn">server-side provider keys</span>
             </div>
           </div>
           <div class="card span-12">
-            <h2>Agent modes</h2>
+            <h2>Codex modes</h2>
             <table>
               <thead>
                 <tr>
                   <th>Mode</th>
                   <th>Intent</th>
                   <th>Codex mapping (1A)</th>
-                  <th>Claude Code mapping (1B)</th>
                   <th>Guardrail</th>
                 </tr>
               </thead>
@@ -1104,34 +1187,81 @@ await ar.runs.create({
                   <td class="mono">default</td>
                   <td>General coding run with controlled workspace writes.</td>
                   <td><span class="mono">codex exec --json --sandbox workspace-write --ask-for-approval never</span></td>
-                  <td><span class="mono">claude --bare -p --permission-mode acceptEdits --output-format stream-json</span></td>
                   <td>No approval UI; permission prompts become <span class="mono">approval_required</span> instead of waiting.</td>
                 </tr>
                 <tr>
                   <td class="mono">read_only</td>
                   <td>Inspection, explanation, and debugging without file writes.</td>
                   <td><span class="mono">codex exec --json --sandbox read-only --ask-for-approval never</span></td>
-                  <td><span class="mono">claude --bare -p --permission-mode plan --tools Read,Grep,Glob,Bash(git:*)</span></td>
                   <td>Any edit, delete, or write attempt fails before artifact collection.</td>
                 </tr>
                 <tr>
                   <td class="mono">full_access</td>
                   <td>Fast implementation inside a disposable Daytona sandbox.</td>
                   <td><span class="mono">codex exec --json --sandbox danger-full-access --ask-for-approval never</span></td>
-                  <td><span class="mono">claude --bare -p --permission-mode bypassPermissions</span></td>
                   <td>Allowed only inside an isolated Daytona sandbox with no host mounts and scrubbed provider env.</td>
                 </tr>
                 <tr>
                   <td class="mono">auto_review</td>
                   <td>Diff review that returns findings, not edits.</td>
                   <td><span class="mono">codex --sandbox read-only --ask-for-approval never exec review --json --base &lt;base&gt;</span></td>
-                  <td><span class="mono">claude --bare -p --permission-mode plan</span> with review-only prompt and read-only tools.</td>
                   <td>Output must normalize to review findings; workspace mutation is blocked.</td>
                 </tr>
               </tbody>
             </table>
+          </div>
+          <div class="card span-12">
+            <h2>Claude Code permission modes</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>Permission mode</th>
+                  <th>Intent</th>
+                  <th>Claude Code mapping (1B)</th>
+                  <th>Guardrail</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="mono">default</td>
+                  <td>Claude Code's conservative default permission behavior.</td>
+                  <td><span class="mono">claude --bare -p --permission-mode default --output-format stream-json</span></td>
+                  <td>Any prompt pauses become <span class="mono">approval_required</span> because Phase 1 has no approval UI.</td>
+                </tr>
+                <tr>
+                  <td class="mono">acceptEdits</td>
+                  <td>Auto-approve file edits while keeping other risky actions constrained by Claude Code.</td>
+                  <td><span class="mono">claude --bare -p --permission-mode acceptEdits --output-format stream-json</span></td>
+                  <td>Still runs inside Daytona with scrubbed env and no host mounts.</td>
+                </tr>
+                <tr>
+                  <td class="mono">plan</td>
+                  <td>Read-only planning or review behavior.</td>
+                  <td><span class="mono">claude --bare -p --permission-mode plan --output-format stream-json</span></td>
+                  <td>Workspace mutation is blocked and classified as provider failure if attempted.</td>
+                </tr>
+                <tr>
+                  <td class="mono">auto</td>
+                  <td>Provider classifier decides which permission requests are safe.</td>
+                  <td><span class="mono">claude --bare -p --permission-mode auto --output-format stream-json</span></td>
+                  <td>Deferred until policy and audit requirements are defined for provider-side classification.</td>
+                </tr>
+                <tr>
+                  <td class="mono">dontAsk</td>
+                  <td>Deny unapproved actions instead of asking.</td>
+                  <td><span class="mono">claude --bare -p --permission-mode dontAsk --output-format stream-json</span></td>
+                  <td>Useful for strict automation; must be tested against denied-tool terminal output.</td>
+                </tr>
+                <tr>
+                  <td class="mono">bypassPermissions</td>
+                  <td>Allow all Claude Code tools without prompts.</td>
+                  <td><span class="mono">claude --bare -p --permission-mode bypassPermissions --output-format stream-json</span></td>
+                  <td>Allowed only inside isolated Daytona sandboxes after credential-boundary proof passes.</td>
+                </tr>
+              </tbody>
+            </table>
             <p>
-              Clients request modes by enum only. They cannot pass raw <span class="mono">--sandbox</span>,
+              Clients request runtime-specific enums only. They cannot pass raw <span class="mono">--sandbox</span>,
               <span class="mono">--permission-mode</span>, <span class="mono">--ask-for-approval</span>,
               <span class="mono">--dangerously-bypass-approvals-and-sandbox</span>, or
               <span class="mono">--dangerously-skip-permissions</span> flags.
@@ -1209,18 +1339,13 @@ const tool = await ar.tools.register({
               client rebuilds the view from Postgres events and R2 artifact metadata, then resumes streaming from
               the last event sequence it has seen.
             </p>
-            <pre>const restored = await ar.runs.restore({
-  runId: "run_...",
+            <pre>const session = await runAgent({
+  client: ar,
+  sessionId: "run_...",
   afterSeq: lastSeenEventSeq
 });
 
-const session = await ar.runs.session("run_...");
-const artifacts = await ar.runs.artifacts("run_...");
-console.log(session.artifactManifest.status, artifacts.items.length);
-
-for await (const event of restored.stream()) {
-  localStorage.setItem("lastEventSeq", String(event.seq));
-}</pre>
+console.log(session.artifactManifest.status, session.artifacts.items.length);</pre>
             <div class="chips">
               <span class="chip ok">GET /v1/runs</span>
               <span class="chip ok">GET /v1/runs/{id}/session</span>
@@ -1242,7 +1367,7 @@ for await (const event of restored.stream()) {
               <tbody>
                 <tr>
                   <td class="mono">validation_error</td>
-                  <td>Bad request body, empty task, unsupported source, or image payload in Phase 1.</td>
+                  <td>Bad request body, empty task, unsupported workspace attachment, or image payload in Phase 1.</td>
                 </tr>
                 <tr>
                   <td class="mono">unauthorized</td>
@@ -1258,7 +1383,7 @@ for await (const event of restored.stream()) {
                 </tr>
                 <tr>
                   <td class="mono">unsupported_runtime_mode</td>
-                  <td>Client requests unknown mode, raw CLI permission flags, CLI resume, TUI, background/remote mode, profile/model override, or unsupported flag.</td>
+                  <td>Client requests unknown mode, raw CLI permission flags, CLI resume, TUI, background/remote mode, raw profile/model flags, or unsupported flag.</td>
                 </tr>
                 <tr>
                   <td class="mono">unsupported_tool_config</td>
@@ -1296,9 +1421,13 @@ for await (const event of restored.stream()) {
     config/                      # env schema, provider preflight, resource prefix rules
     db/                          # SQL migrations, typed queries, transactional repositories
     openapi/                     # openapi.yaml, schema tests, generated API types
-    sdk-typescript/              # public SDK built only from OpenAPI/public types
+    sdk-typescript/              # Vercel-style facade plus generated OpenAPI client
+      src/runtime.ts             # codex(), claudeCode(), mode helpers
+      src/functions.ts           # runAgent(), streamAgent(), wait/session helpers
+      src/transport.ts           # agentrouter(), fetch transport, retry/auth hooks
+      src/client.ts              # low-level OpenAPI-backed ar.* direct methods
     runtime/
-      contracts/                 # RuntimeAdapter interface, RuntimeMode resolver
+      contracts/                 # RuntimeAdapter interface, provider permission resolver
       codex-cli/                 # Codex argv builder, JSONL parser, terminal classifier
       claude-code/               # Phase 1B Claude argv builder, stream-json parser, terminal classifier
     sandbox/
@@ -1388,8 +1517,8 @@ for await (const event of restored.stream()) {
                 </tr>
                 <tr>
                   <td class="mono">packages/sdk-typescript</td>
-                  <td>Public SDK ergonomics over OpenAPI types.</td>
-                  <td>Generated OpenAPI types only.</td>
+                  <td>Public SDK facade, transport config, runtime helpers, and low-level OpenAPI client.</td>
+                  <td>Generated OpenAPI types and Web Fetch primitives only.</td>
                   <td>Server internals, provider packages, database types, secret env names.</td>
                 </tr>
               </tbody>
@@ -1397,7 +1526,10 @@ for await (const event of restored.stream()) {
           </div>
           <div class="card span-7">
             <h2>Dependency direction</h2>
-            <pre class="diagram">sdk-typescript
+            <pre class="diagram">sdk facade functions
+      |
+      v
+sdk transport + generated client
       |
       v
 openapi types
@@ -1551,8 +1683,8 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td class="mono">03</td>
-                  <td>Thin TypeScript SDK over OpenAPI-generated types.</td>
-                  <td><span class="mono">runs.create</span>, <span class="mono">runs.restore</span>, <span class="mono">runs.session</span>, <span class="mono">runs.artifacts</span>, <span class="mono">runs.downloadArtifact</span>, <span class="mono">runs.stream</span>, <span class="mono">runs.createAndWait</span>, and <span class="mono">runs.cancel</span> work.</td>
+                  <td>TypeScript SDK with Vercel-style top-level helpers over an OpenAPI-generated client.</td>
+                  <td><span class="mono">runAgent</span>, <span class="mono">streamAgent</span>, <span class="mono">codex</span>, <span class="mono">claudeCode</span>, and low-level direct <span class="mono">ar.*</span> methods all match the OpenAPI contract.</td>
                 </tr>
                 <tr>
                   <td class="mono">04</td>
@@ -1671,7 +1803,7 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td class="mono">pnpm test:runtime:modes</td>
-                  <td>Each public mode maps to exact Codex flags in Phase 1A and exact Claude Code flags in Phase 1B, rejects raw CLI overrides, and records the resolved permission profile.</td>
+                  <td>Each Codex mode and Claude Code permission mode maps to exact provider flags, rejects raw CLI overrides, and records the resolved permission profile.</td>
                 </tr>
                 <tr>
                   <td class="mono">pnpm test:runtime:terminal-output</td>
@@ -1683,7 +1815,15 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td class="mono">pnpm test:sdk</td>
-                  <td>SDK create, list, get, session, artifacts, downloadArtifact, restore, stream, cancel, and createAndWait flows match the OpenAPI contract.</td>
+                  <td>SDK top-level helpers, runtime helpers, transport auth, restore/resume, stream, artifacts, cancel, typed errors, and low-level client flows match the OpenAPI contract.</td>
+                </tr>
+                <tr>
+                  <td class="mono">pnpm test:sdk:ergonomics</td>
+                  <td><span class="mono">runAgent</span> and <span class="mono">streamAgent</span> work with the minimum documented options, default Node env config, helper-built runtime objects, and no caller-visible REST ceremony.</td>
+                </tr>
+                <tr>
+                  <td class="mono">pnpm test:sdk:transport</td>
+                  <td>Custom fetch, dynamic API key providers, retry hooks, request metadata, abort signals, stream reconnect, and typed HTTP errors behave consistently.</td>
                 </tr>
                 <tr>
                   <td class="mono">pnpm test:daytona</td>
@@ -1830,11 +1970,11 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
               <li>Forced failed runs still produce inspectable events, partial artifacts, and cleanup records.</li>
               <li>Concurrent workers cannot double-run or double-clean one run.</li>
               <li>OpenAPI spec validates in CI.</li>
-              <li>TypeScript SDK can create, list, get, restore, stream, wait, cancel, inspect sessions, list artifacts, and download artifacts.</li>
+              <li>TypeScript SDK top-level helpers can run, stream, resume, cancel, inspect sessions, list artifacts, download artifacts, and still expose the low-level OpenAPI client for advanced users.</li>
               <li>Reconnected clients restore run state from <span class="mono">lastEventSeq</span> without duplicating events.</li>
               <li>Codex adapter classifies success, failure, cancellation, malformed output, and partial summaries.</li>
               <li>Phase 1B Claude Code adapter classifies success, failure, permissions, cancellation, malformed output, and partial summaries.</li>
-              <li>Each public mode resolves to audited Codex flags in Phase 1A and audited Claude Code flags in Phase 1B, then stores the resolved profile with the run attempt.</li>
+              <li>Each Codex mode and Claude Code permission mode resolves to audited provider flags, then stores the resolved profile with the run attempt.</li>
               <li><span class="mono">auto_review</span> produces review findings without modifying the workspace.</li>
               <li><span class="mono">full_access</span> works only inside isolated Daytona sandboxes and still cannot expose provider keys.</li>
               <li>User-defined tool configs are rejected in Phase 1; built-in sandbox tools still emit normalized command/tool events.</li>
@@ -1897,8 +2037,9 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
           <div class="card span-12">
             <h2>Real E2E scenarios</h2>
             <p>
-              Phase 1A runs this scenario matrix with Codex only. Phase 1B reruns the same matrix for
-              Claude Code to prove provider parity without changing API, SDK, database, or artifact contracts.
+              Phase 1A runs this scenario matrix with Codex only in a fresh scratch workspace. Phase 1B reruns
+              the same matrix for Claude Code to prove provider parity without changing API, SDK, database,
+              or artifact contracts.
             </p>
             <table>
               <thead>
@@ -1910,19 +2051,14 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
               </thead>
               <tbody>
                 <tr>
-                  <td>Fixture repository</td>
-                  <td>Clone <span class="mono">AGENTROUTER_E2E_REPO_URL</span> at <span class="mono">AGENTROUTER_E2E_REPO_BASE_REF</span>. The repo must contain <span class="mono">README.md</span>, <span class="mono">tmp/delete-me.txt</span>, and a small testable project.</td>
-                  <td>Checkout hash is recorded in the run session and all file assertions compare against that baseline.</td>
-                </tr>
-                <tr>
                   <td>Read-only run</td>
-                  <td>Create a Codex run with <span class="mono">runtime.mode=read_only</span> asking for repo summary and no edits. Phase 1B repeats with Claude Code.</td>
+                  <td>Create a Codex run with <span class="mono">runtime.mode=read_only</span> asking for a runtime plan summary and no edits. Phase 1B repeats with Claude Code.</td>
                   <td>Runs complete, events stream, no workspace diff exists, and write attempts are rejected if the prompt tries to force one.</td>
                 </tr>
                 <tr>
                   <td>Workspace-write run</td>
-                  <td>Create a default-mode run asking the agent to create <span class="mono">reports/agent-smoke.txt</span>, modify <span class="mono">README.md</span>, delete <span class="mono">tmp/delete-me.txt</span>, and summarize.</td>
-                  <td>Patch, file index, checksums, downloaded artifact bytes, and final summary match the sandbox output.</td>
+                  <td>Create a default-mode run asking the agent to create <span class="mono">reports/agent-smoke.txt</span>, <span class="mono">nested/output file with spaces.txt</span>, and a short final summary.</td>
+                  <td>File index, checksums, downloaded artifact bytes, and final summary match the sandbox output.</td>
                 </tr>
                 <tr>
                   <td>Long-output run</td>
@@ -1936,8 +2072,8 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td>Auto-review run</td>
-                  <td>Create a branch/diff in the fixture checkout and run Codex with <span class="mono">runtime.mode=auto_review</span>. Phase 1B repeats with Claude Code.</td>
-                  <td>Review findings normalize to severity/title/body/file/line where available and the workspace checksum remains unchanged.</td>
+                  <td>Run Codex with <span class="mono">runtime.mode=auto_review</span> against the scratch workspace. Phase 1B repeats with Claude Code.</td>
+                  <td>The mode returns a typed no-diff review result or normalized findings if the run produced a diff, and the workspace checksum remains unchanged.</td>
                 </tr>
                 <tr>
                   <td>Restore run</td>
@@ -1985,8 +2121,8 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td>SDK</td>
-                  <td>One-call create, session inspection, artifact listing/download, restore, streaming, create-and-wait, cancel, and typed errors are ergonomic.</td>
-                  <td>Stream disconnect resumes from last event sequence or falls back to event polling; artifact download returns the exact R2 bytes.</td>
+                  <td>One-call run, streaming run, resume, session inspection, artifact listing/download, cancel, dynamic auth transport, and typed errors are ergonomic.</td>
+                  <td>Stream disconnect resumes from last event sequence or falls back to event polling; dynamic auth refreshes before retry; artifact download returns the exact R2 bytes.</td>
                 </tr>
                 <tr>
                   <td>SSE stream</td>
@@ -2060,12 +2196,12 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td>Codex</td>
-                  <td><span class="mono">codex exec --json</span> supports every Phase 1 input mode and returns one terminal classification.</td>
+                  <td><span class="mono">codex exec --json</span> supports every Phase 1A Codex mode and returns one terminal classification.</td>
                   <td>Missing auth, missing binary, old CLI version, empty prompt, missing git repo, required MCP failure, approval-required block, non-zero exit, <span class="mono">turn.failed</span>, top-level <span class="mono">error</span>, malformed JSONL, stderr noise, schema mismatch, no final summary, or unsupported flag.</td>
                 </tr>
                 <tr>
                   <td>Claude Code</td>
-                  <td>Phase 1B: <span class="mono">claude --bare -p --output-format stream-json --verbose</span> supports every Phase 1 input mode and returns one terminal classification.</td>
+                  <td>Phase 1B: <span class="mono">claude --bare -p --output-format stream-json --verbose</span> supports every Phase 1B permission mode and returns one terminal classification.</td>
                   <td>Missing auth, missing binary, old CLI version, empty prompt, missing git repo, permission denied, non-zero exit, JSON result error, malformed stream-json, schema mismatch, no final result, or unsupported flag.</td>
                 </tr>
                 <tr>
@@ -2331,13 +2467,13 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td>Auto review</td>
-                  <td>Uses <span class="mono">codex exec review --json</span> with base/commit/uncommitted source, read-only permissions, and findings-only output.</td>
+                  <td>Uses <span class="mono">codex exec review --json</span> with base/commit/uncommitted diff input, read-only permissions, and findings-only output.</td>
                   <td>E2E review fixture creates a diff, gets normalized findings, and proves the workspace checksum is unchanged.</td>
                 </tr>
                 <tr>
                   <td>Model, profile, and OSS modes</td>
-                  <td>Client cannot pass <span class="mono">--model</span>, <span class="mono">--profile</span>, or <span class="mono">--oss</span>; Phase 1 uses server-owned Codex defaults.</td>
-                  <td>Adapter tests reject client overrides and prove no local-provider path is reachable.</td>
+                  <td>Client may set <span class="mono">runtime.model</span>, which the adapter maps to <span class="mono">--model &lt;model&gt;</span>. Raw <span class="mono">--model</span>, <span class="mono">--profile</span>, and <span class="mono">--oss</span> remain blocked.</td>
+                  <td>Adapter tests assert model argv ordering, API/SDK tests persist <span class="mono">runtime.model</span>, and raw provider flag injection is rejected.</td>
                 </tr>
                 <tr>
                   <td>Image inputs</td>
@@ -2433,9 +2569,9 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                   <td>Assert raw provider key is not in argv, sandbox-wide env, home config, workspace files, events, logs, R2 artifacts, or API responses.</td>
                 </tr>
                 <tr>
-                  <td>Mode mapping</td>
-                  <td>Maps <span class="mono">default</span> to Claude <span class="mono">acceptEdits</span>, <span class="mono">read_only</span> and <span class="mono">auto_review</span> to <span class="mono">plan</span> with read-only tools, and <span class="mono">full_access</span> to <span class="mono">bypassPermissions</span> only inside Daytona.</td>
-                  <td>Spawn fixtures assert exact argv and resolved <span class="mono">permission_profile_json</span> for every public mode.</td>
+                  <td>Permission mode</td>
+                  <td>Uses the caller's Claude-specific <span class="mono">permissionMode</span> value directly: <span class="mono">default</span>, <span class="mono">acceptEdits</span>, <span class="mono">plan</span>, <span class="mono">auto</span>, <span class="mono">dontAsk</span>, or <span class="mono">bypassPermissions</span>.</td>
+                  <td>Spawn fixtures assert exact argv and resolved <span class="mono">permission_profile_json</span> for every Claude permission mode.</td>
                 </tr>
                 <tr>
                   <td>Secret scope</td>
@@ -2499,12 +2635,12 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                 </tr>
                 <tr>
                   <td>Permission mode</td>
-                  <td>Supports public modes through AgentRouter mapping only: <span class="mono">acceptEdits</span>, <span class="mono">plan</span>, and sandbox-gated <span class="mono">bypassPermissions</span>; raw <span class="mono">default</span>, <span class="mono">dontAsk</span>, and provider <span class="mono">auto</span> are deferred until policy profiles exist.</td>
+                  <td>Supports Claude Code's own permission modes as <span class="mono">runtime.permissionMode</span>: <span class="mono">default</span>, <span class="mono">acceptEdits</span>, <span class="mono">plan</span>, <span class="mono">auto</span>, <span class="mono">dontAsk</span>, and sandbox-gated <span class="mono">bypassPermissions</span>.</td>
                   <td>Tests prove permission prompts and denied tools fail as <span class="mono">approval_required</span> or <span class="mono">provider_runtime_failed</span>, never hanging the worker.</td>
                 </tr>
                 <tr>
                   <td>Dangerous permissions</td>
-                  <td>Rejects raw <span class="mono">--dangerously-skip-permissions</span>, raw <span class="mono">bypassPermissions</span>, and <span class="mono">--allow-dangerously-skip-permissions</span>. Full access is allowed only through <span class="mono">runtime.mode</span> after Daytona isolation checks.</td>
+                  <td>Rejects raw <span class="mono">--dangerously-skip-permissions</span>, raw <span class="mono">bypassPermissions</span>, and <span class="mono">--allow-dangerously-skip-permissions</span>. Bypass is allowed only through <span class="mono">runtime.permissionMode</span> after Daytona isolation checks.</td>
                   <td>SDK/API validation returns <span class="mono">unsupported_runtime_mode</span> before worker claim.</td>
                 </tr>
                 <tr>
@@ -2533,9 +2669,9 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
                   <td>Adapter test proves the worker owns process lifetime and never detaches work outside Daytona.</td>
                 </tr>
                 <tr>
-                  <td>Model/profile overrides</td>
-                  <td>Client cannot pass <span class="mono">--model</span>, <span class="mono">--fallback-model</span>, <span class="mono">--settings</span>, <span class="mono">--setting-sources</span>, or model effort overrides in Phase 1.</td>
-                  <td>Validation rejects client model/config overrides and uses server-owned defaults.</td>
+                  <td>Model/config overrides</td>
+                  <td>Client may set <span class="mono">runtime.model</span>, which the adapter maps to Claude Code <span class="mono">--model &lt;model&gt;</span>. Raw <span class="mono">--model</span>, <span class="mono">--fallback-model</span>, <span class="mono">--settings</span>, <span class="mono">--setting-sources</span>, and model effort overrides remain blocked.</td>
+                  <td>Validation accepts the typed <span class="mono">model</span> field, rejects raw config flags, and records the selected model on the run attempt.</td>
                 </tr>
                 <tr>
                   <td>System prompt flags</td>
@@ -2583,9 +2719,9 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
           <div class="card span-12">
             <h2>E2E runtime test</h2>
             <p>
-              Phase 1A is usable when this API flow works against real Daytona, Codex, Postgres, R2,
-              and the configured <span class="mono">AGENTROUTER_E2E_REPO_URL</span>. Phase 1B reruns
-              the same flow with Claude Code.
+              Phase 1A is usable when this API flow works against real Daytona, Codex, Postgres, and R2.
+              Every public run starts in a fresh scratch workspace. Phase 1B reruns the same flow with
+              Claude Code.
             </p>
             <pre>Preflight:
   pnpm test:smoke:providers
@@ -2593,22 +2729,18 @@ No upward imports. No adapter import from API. No SDK import from server.</pre>
 
 POST /v1/runs
 {
-  "repoUrl": "$AGENTROUTER_E2E_REPO_URL",
-  "baseRef": "$AGENTROUTER_E2E_REPO_BASE_REF",
-  "task": "Inspect this repo and summarize what should be improved first",
-  "runtime": { "kind": "codex", "mode": "auto_review" }
+  "task": "Explain what the runtime worker must do during a long run",
+  "runtime": { "kind": "codex", "mode": "read_only", "model": "gpt-4o" }
 }
 
 POST /v1/runs
 {
-  "repoUrl": "$AGENTROUTER_E2E_REPO_URL",
-  "baseRef": "$AGENTROUTER_E2E_REPO_BASE_REF",
-  "task": "Create reports/agent-smoke.txt and summarize the change",
-  "runtime": { "kind": "codex", "mode": "default" }
+  "task": "Create reports/agent-smoke.txt and nested/output file with spaces.txt, then summarize the change",
+  "runtime": { "kind": "codex", "mode": "default", "model": "gpt-4o" }
 }
 
 Phase 1B parity reruns both requests with:
-  "runtime": { "kind": "claude_code", "mode": "..." }
+  "runtime": { "kind": "claude_code", "permissionMode": "acceptEdits", "model": "claude-sonnet-4-6" }
 
 Expected response:
 {
@@ -2625,7 +2757,6 @@ Then poll:
 
 Workspace artifact path:
   Ask the agent to create reports/agent-smoke.txt,
-  modify README.md, delete tmp/delete-me.txt,
   and create nested/output file with spaces.txt.
   GET /v1/runs/:id/session includes those file-index entries.
   Downloaded R2 objects match the sandbox checksums.
@@ -2659,9 +2790,10 @@ Cancel path:
           <div class="card span-12">
             <h2>OpenAPI contract</h2>
             <p>
-              Phase 1 ships a checked-in <span class="mono">openapi.yaml</span> and a small TypeScript SDK. The
-              API contract defines request/response schemas, run statuses, session snapshots, event payloads,
-              artifact metadata, download behavior, and typed error codes for the runtime surface.
+              Phase 1 ships a checked-in <span class="mono">openapi.yaml</span>, a generated low-level
+              TypeScript client, and a small ergonomic SDK facade. The API contract defines request/response
+              schemas, run statuses, session snapshots, event payloads, artifact metadata, download behavior,
+              and typed error codes for the runtime surface.
             </p>
             <div class="chips">
               <span class="chip ok">GET /v1/runs</span>
@@ -2674,7 +2806,8 @@ Cancel path:
               <span class="chip ok">GET /v1/runs/{id}/artifacts</span>
               <span class="chip ok">artifact download</span>
               <span class="chip ok">runtime.kind enum</span>
-              <span class="chip ok">runtime.mode enum</span>
+              <span class="chip ok">codex mode enum</span>
+              <span class="chip ok">claude permissionMode enum</span>
               <span class="chip ok">typed errors</span>
             </div>
           </div>
