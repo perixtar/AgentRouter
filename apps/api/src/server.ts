@@ -13,7 +13,7 @@ import {
   type RunRecord,
   withSearchPath
 } from "@agentrouter/db";
-import type { RuntimePermissionValue } from "@agentrouter/core";
+import type { AgentResponse, RuntimePermissionValue } from "@agentrouter/core";
 
 export interface BuildApiServerInput {
   pool: Pool;
@@ -139,10 +139,6 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
     assertNoUnsupportedConfiguration(request.body);
     const parsed = createRunSchema.parse(request.body);
 
-    if (parsed.runtime.kind !== "codex") {
-      throw new ApiError(400, "unsupported_runtime_kind", "Phase 1A supports Codex runs only");
-    }
-
     const requestHash = hashStableJson(parsed);
     const idempotencyKey = request.headers["idempotency-key"];
     const keyHash = typeof idempotencyKey === "string" ? hashString(idempotencyKey) : undefined;
@@ -254,12 +250,15 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
       const run = await repo.getRun(runId);
       if (!run) throw new ApiError(404, "run_not_found", "Run not found");
       const artifacts = await repo.listArtifacts(runId);
-      return { run, artifacts };
+      const afterSeq = run.lastEventSeq > 500n ? run.lastEventSeq - 500n : 0n;
+      const events = await repo.listEvents({ runId, afterSeq, limit: 500 });
+      return { run, artifacts, events };
     });
 
     return {
       run: runToApi(snapshot.run),
       eventCursor: { lastEventSeq: Number(snapshot.run.lastEventSeq) },
+      response: responseFromEvents(snapshot.events),
       artifactManifest: manifestFromArtifacts(snapshot.artifacts),
       artifacts: { items: snapshot.artifacts.map(artifactToApi) }
     };
@@ -487,6 +486,33 @@ function manifestFromArtifacts(artifacts: ArtifactRecord[]): Record<string, unkn
     sizeBytes: Number(manifest.sizeBytes),
     sha256: manifest.sha256
   };
+}
+
+function responseFromEvents(events: EventRecord[]): (AgentResponse & { provider?: string }) | null {
+  const event = [...events].reverse().find((item) => item.eventType === "agent.response");
+  if (!event) return null;
+  const payload = event.payload;
+  if (typeof payload.text !== "string") return null;
+  const parts = Array.isArray(payload.parts)
+    ? payload.parts.filter(isAgentResponseTextPart)
+    : [{ type: "text" as const, text: payload.text }];
+
+  return {
+    text: payload.text,
+    parts,
+    providerEventType:
+      typeof payload.providerEventType === "string" ? payload.providerEventType : undefined,
+    provider: typeof payload.provider === "string" ? payload.provider : undefined
+  };
+}
+
+function isAgentResponseTextPart(value: unknown): value is { type: "text"; text: string } {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    (value as { type?: unknown }).type === "text" &&
+    typeof (value as { text?: unknown }).text === "string"
+  );
 }
 
 function sseEvent(event: EventRecord): string {

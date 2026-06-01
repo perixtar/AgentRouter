@@ -1,5 +1,11 @@
 import { config as loadDotEnv } from "dotenv";
-import { AgentRouterError, agentrouter, codex, type RunEvent } from "@agentrouter/sdk";
+import {
+  AgentRouterError,
+  agentrouter,
+  claudeCode,
+  codex,
+  type RunEvent
+} from "@agentrouter/sdk";
 
 loadDotEnv();
 
@@ -8,7 +14,7 @@ export function makeExampleClient() {
     process.env.AGENTROUTER_API_BASE_URL ??
     process.env.AGENTROUTER_BASE_URL ??
     "http://127.0.0.1:8787";
-  const apiKey = process.env.AGENTROUTER_API_KEY ?? "ar_dev_local_change_me";
+  const apiKey = requireExampleApiKey();
 
   return {
     baseUrl,
@@ -17,9 +23,24 @@ export function makeExampleClient() {
   };
 }
 
+function requireExampleApiKey(): string {
+  const apiKey = process.env.AGENTROUTER_API_KEY;
+  if (!apiKey || apiKey === "ar_dev_local_change_me") {
+    throw new Error("Set AGENTROUTER_API_KEY to the private bearer token configured for the API");
+  }
+  return apiKey;
+}
+
 export function codexRuntime(mode: "default" | "read_only" | "full_access" | "auto_review" = "default") {
   const runtimeModel = process.env.AGENTROUTER_MODEL;
   return codex({ mode, ...(runtimeModel ? { model: runtimeModel } : {}) });
+}
+
+export function claudeCodeRuntime(
+  permissionMode: "default" | "acceptEdits" | "plan" | "auto" | "dontAsk" | "bypassPermissions" = "default"
+) {
+  const runtimeModel = process.env.AGENTROUTER_CLAUDE_MODEL ?? process.env.AGENTROUTER_MODEL;
+  return claudeCode({ permissionMode, ...(runtimeModel ? { model: runtimeModel } : {}) });
 }
 
 export function logRunEvent(event: RunEvent): void {
@@ -45,6 +66,12 @@ export function handleExampleError(error: unknown): void {
     if (error.details) {
       console.error(JSON.stringify(error.details, null, 2));
     }
+    process.exitCode = 1;
+    return;
+  }
+
+  if (error instanceof Error) {
+    console.error(error.message);
     process.exitCode = 1;
     return;
   }

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
-import { agentrouter, codex, streamAgent, type RunEvent } from "@agentrouter/sdk";
+import { agentrouter, claudeCode, streamAgent, type RunEvent } from "@agentrouter/sdk";
 import { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
@@ -15,7 +15,7 @@ loadDotEnv();
 
 const describeRealE2E = process.env.AGENTROUTER_RUN_REAL_E2E === "1" ? describe : describe.skip;
 
-describeRealE2E("real Codex API + worker E2E", () => {
+describeRealE2E("real Claude Code API + worker E2E", () => {
   const config = parseAgentRouterEnv(process.env);
   const schema = `${config.testResourcePrefix}_${randomUUID().replaceAll("-", "_")}`;
   const pool = new Pool({ connectionString: config.databaseUrl });
@@ -26,10 +26,14 @@ describeRealE2E("real Codex API + worker E2E", () => {
     apiKey: config.apiKey,
     artifactBytes: artifactStore
   });
-  let baseUrl = "";
   const runIds: string[] = [];
+  let baseUrl = "";
 
   beforeAll(async () => {
+    if (!config.anthropicApiKey) {
+      throw new Error("Missing ANTHROPIC_API_KEY for Claude Code E2E");
+    }
+
     const client = await pool.connect();
     try {
       await applyPhase1Migrations(client, schema);
@@ -58,9 +62,9 @@ describeRealE2E("real Codex API + worker E2E", () => {
     }
   });
 
-  it("streams, archives, restores, and drains a real Codex coding run", async () => {
+  it("streams, archives, restores, and drains a real Claude Code coding run", async () => {
     const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
-    const runtimeModel = process.env.AGENTROUTER_MODEL;
+    const runtimeModel = process.env.AGENTROUTER_CLAUDE_MODEL ?? process.env.AGENTROUTER_MODEL;
     const controller = new AbortController();
     const worker = runWorkerLoop({
       pool,
@@ -73,6 +77,7 @@ describeRealE2E("real Codex API + worker E2E", () => {
       artifactStore,
       testResourcePrefix: config.testResourcePrefix,
       codexApiKey: config.codexApiKey,
+      anthropicApiKey: config.anthropicApiKey,
       baseEnv: process.env,
       signal: controller.signal,
       pollIntervalMs: 250
@@ -84,8 +89,11 @@ describeRealE2E("real Codex API + worker E2E", () => {
         pollIntervalMs: 500,
         maxWaitMs: 10 * 60 * 1000,
         task:
-          "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CODEX_E2E_OK\\n' > reports/agent-smoke.txt. Then summarize the change in one sentence.",
-        runtime: codex({ mode: "full_access", ...(runtimeModel ? { model: runtimeModel } : {}) })
+          "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CLAUDE_E2E_OK\\n' > reports/claude-smoke.txt. Then summarize the change in one sentence.",
+        runtime: claudeCode({
+          permissionMode: "bypassPermissions",
+          ...(runtimeModel ? { model: runtimeModel } : {})
+        })
       });
       runIds.push(stream.run.id);
 
@@ -99,11 +107,12 @@ describeRealE2E("real Codex API + worker E2E", () => {
         client: sdk,
         session: result.session,
         events,
-        providerSource: "codex",
-        runtimeKind: "codex",
-        marker: "AR_CODEX_E2E_OK",
-        createdPath: "reports/agent-smoke.txt",
+        providerSource: "claude_code",
+        runtimeKind: "claude_code",
+        marker: "AR_CLAUDE_E2E_OK",
+        createdPath: "reports/claude-smoke.txt",
         secretCanaries: [
+          config.anthropicApiKey,
           config.codexApiKey,
           config.daytonaApiKey,
           config.r2.secretAccessKey,
@@ -127,6 +136,7 @@ describeRealE2E("real Codex API + worker E2E", () => {
         artifactStore,
         testResourcePrefix: config.testResourcePrefix,
         codexApiKey: config.codexApiKey,
+        anthropicApiKey: config.anthropicApiKey,
         baseEnv: process.env
       })
     ).resolves.toEqual({ processed: false });

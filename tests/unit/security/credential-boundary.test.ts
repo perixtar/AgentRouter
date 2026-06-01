@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProviderProcessEnv,
+  redactCredentialCanaries,
   scrubToolEnvironment,
   scanForCredentialCanaries
 } from "@agentrouter/credential-boundary";
@@ -50,5 +51,11 @@ describe("credential boundary", () => {
   it("detects credential canaries in output before archiving", () => {
     expect(scanForCredentialCanaries("safe output", ["sk-canary"])).toEqual([]);
     expect(scanForCredentialCanaries("leaked sk-canary", ["sk-canary"])).toEqual(["sk-canary"]);
+  });
+
+  it("redacts credential canaries before any content is safe to archive", () => {
+    expect(redactCredentialCanaries("leaked sk-canary", ["sk-canary"])).toBe(
+      "leaked [REDACTED]"
+    );
   });
 });

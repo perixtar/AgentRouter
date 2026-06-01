@@ -3,7 +3,6 @@ import {
   codexRuntime,
   handleExampleError,
   hasHelpFlag,
-  logRunEvent,
   makeExampleClient
 } from "./shared.js";
 
@@ -12,9 +11,8 @@ if (hasHelpFlag()) {
   process.exit(0);
 }
 
-const { baseUrl, client } = makeExampleClient();
-
 try {
+  const { baseUrl, client } = makeExampleClient();
   const stream = await streamAgent({
     client,
     task:
@@ -27,18 +25,16 @@ try {
 
   console.log(`API: ${baseUrl}`);
   console.log(`Run ${stream.run.id}: ${stream.run.status}`);
-  console.log("Streaming normalized events:");
+  console.log("Streaming agent response:");
 
-  for await (const event of stream.events) {
-    logRunEvent(event);
+  for await (const textPart of stream.textStream) {
+    process.stdout.write(textPart);
   }
+  process.stdout.write("\n");
 
-  const session = await stream.finalSession;
-  console.log(`Final status: ${session.run.status}`);
-  console.log(`Last event sequence: ${session.eventCursor.lastEventSeq}`);
-  console.log(
-    `Artifacts: ${session.artifacts.items.map((artifact) => artifact.kind).join(", ") || "(none)"}`
-  );
+  const result = await stream.finalResult;
+  console.log(`Final status: ${result.status}`);
+  console.log(`Last event sequence: ${result.eventCursor.lastEventSeq}`);
 } catch (error) {
   handleExampleError(error);
 }
@@ -46,8 +42,8 @@ try {
 function printHelp(): void {
   console.log(`streamAgent example
 
-Creates a Codex run, streams normalized events until the run is terminal, then
-prints the restored session and artifacts.
+Creates a Codex run, streams result text until the run is terminal, then prints
+the final status.
 
 Prerequisites:
   pnpm dev
@@ -61,7 +57,7 @@ Run:
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787
-  AGENTROUTER_API_KEY=ar_dev_local_change_me
+  AGENTROUTER_API_KEY=<random-private-token>
   AGENTROUTER_MODEL=gpt-4o
   AGENTROUTER_TASK="Create reports/stream-example.txt"
 `);

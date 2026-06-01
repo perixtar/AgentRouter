@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
-import { agentrouter, codex, runAgent, streamAgent } from "@agentrouter/sdk";
+import { agentrouter, claudeCode, codex, runAgent, streamAgent } from "@agentrouter/sdk";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
 import {
@@ -74,6 +74,17 @@ describe("AgentRouter TypeScript SDK", () => {
         await repo.appendEvent({
           runId: run.id,
           source: "worker",
+          eventType: "agent.response",
+          visibility: "public",
+          payload: {
+            text: "SDK final answer",
+            parts: [{ type: "text", text: "SDK final answer" }],
+            provider: "codex"
+          }
+        });
+        await repo.appendEvent({
+          runId: run.id,
+          source: "worker",
           eventType: "run.completed",
           visibility: "public",
           payload: { message: "done" }
@@ -88,14 +99,16 @@ describe("AgentRouter TypeScript SDK", () => {
 
     const restored = await sdk.getRunSession(run.id);
     expect(restored.run.status).toBe("completed");
-    expect(restored.eventCursor.lastEventSeq).toBe(1);
+    expect(restored.eventCursor.lastEventSeq).toBe(2);
+    expect(restored.response?.text).toBe("SDK final answer");
 
     const events = [];
     for await (const event of sdk.streamRun(run.id)) {
       events.push(event);
     }
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ type: "run.completed" });
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: "agent.response" });
+    expect(events[1]).toMatchObject({ type: "run.completed" });
 
     await expect(
       runAgent({
@@ -108,7 +121,10 @@ describe("AgentRouter TypeScript SDK", () => {
       })
     ).resolves.toMatchObject({
       run: { id: run.id, status: "completed" },
-      eventCursor: { lastEventSeq: 1 }
+      text: "SDK final answer",
+      session: {
+        eventCursor: { lastEventSeq: 2 }
+      }
     });
 
     await expect(
@@ -148,6 +164,17 @@ describe("AgentRouter TypeScript SDK", () => {
         await repo.appendEvent({
           runId: stream.run.id,
           source: "worker",
+          eventType: "agent.response",
+          visibility: "public",
+          payload: {
+            text: "streamed final answer",
+            parts: [{ type: "text", text: "streamed final answer" }],
+            provider: "codex"
+          }
+        });
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
           eventType: "run.completed",
           visibility: "public",
           payload: { message: "streamed" }
@@ -165,10 +192,38 @@ describe("AgentRouter TypeScript SDK", () => {
       events.push(event);
     }
 
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ type: "run.completed" });
-    await expect(stream.finalSession).resolves.toMatchObject({
-      run: { id: stream.run.id, status: "completed" }
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: "agent.response" });
+    expect(events[1]).toMatchObject({ type: "run.completed" });
+
+    const textParts: string[] = [];
+    for await (const textPart of stream.textStream) {
+      textParts.push(textPart);
+    }
+    expect(textParts).toEqual(["streamed final answer"]);
+
+    await expect(stream.finalResult).resolves.toMatchObject({
+      run: { id: stream.run.id, status: "completed" },
+      text: "streamed final answer"
+    });
+  });
+
+  it("creates Claude Code runs through the same SDK client", async () => {
+    const sdk = agentrouter({
+      baseUrl,
+      apiKey: config.apiKey
+    });
+
+    const run = await sdk.createRun({
+      task: "Create reports/claude-sdk.txt",
+      runtime: claudeCode({ permissionMode: "acceptEdits", model: "claude-sonnet-4-6" })
+    });
+
+    expect(run.status).toBe("queued");
+    expect(run.runtime).toMatchObject({
+      kind: "claude_code",
+      permissionMode: "acceptEdits",
+      model: "claude-sonnet-4-6"
     });
   });
 

@@ -3,6 +3,7 @@ import {
   normalizeEventPayload,
   transitionRunStatus,
   type ArtifactRef,
+  type ClaudeCodePermissionMode,
   type CodexRuntimeMode,
   type RuntimeModel,
   type RuntimeKind,
@@ -292,10 +293,24 @@ export interface CodexRunRecord extends RunRecord {
   runtimeMode: CodexRuntimeMode;
 }
 
+export interface ClaudeCodeRunRecord extends RunRecord {
+  runtimeKind: "claude_code";
+  runtimeMode: ClaudeCodePermissionMode;
+}
+
 export function isCodexRunRecord(run: RunRecord): run is CodexRunRecord {
   return (
     run.runtimeKind === "codex" &&
     ["default", "read_only", "full_access", "auto_review"].includes(run.runtimeMode)
+  );
+}
+
+export function isClaudeCodeRunRecord(run: RunRecord): run is ClaudeCodeRunRecord {
+  return (
+    run.runtimeKind === "claude_code" &&
+    ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"].includes(
+      run.runtimeMode
+    )
   );
 }
 

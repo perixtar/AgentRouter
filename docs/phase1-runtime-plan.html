@@ -335,6 +335,279 @@
       color: #d9e3f0;
     }
 
+    .diagram-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .diagram-title h2 {
+      margin: 0;
+    }
+
+    .diagram-label {
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      background: var(--bg-inset);
+      color: var(--tx-3);
+      padding: 4px 7px;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .runtime-map,
+    .sandbox-map,
+    .artifact-map,
+    .state-map {
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: var(--bg-inset);
+      padding: 12px;
+    }
+
+    .runtime-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 54px minmax(0, 1fr) 54px minmax(0, 1fr);
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .runtime-row + .runtime-row {
+      margin-top: 10px;
+    }
+
+    .runtime-row.secondary {
+      grid-template-columns: minmax(0, 1fr) 54px minmax(0, 1.1fr) 54px minmax(0, 1fr);
+    }
+
+    .diagram-node {
+      min-height: 92px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-2);
+      padding: 10px;
+      display: grid;
+      align-content: start;
+      gap: 6px;
+    }
+
+    .diagram-node.accent {
+      border-color: var(--acc-line);
+      background: var(--acc-soft);
+    }
+
+    .diagram-node.info {
+      border-color: rgba(96, 165, 250, 0.28);
+      background: rgba(96, 165, 250, 0.08);
+    }
+
+    .diagram-node.warn {
+      border-color: rgba(244, 184, 74, 0.3);
+      background: rgba(244, 184, 74, 0.08);
+    }
+
+    .diagram-node strong {
+      color: var(--tx);
+      font-size: 14px;
+      line-height: 1.2;
+    }
+
+    .diagram-node span {
+      color: var(--tx-3);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .node-kicker {
+      color: var(--tx-4);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .diagram-arrow {
+      display: grid;
+      place-items: center;
+      color: var(--tx-4);
+      font-size: 22px;
+      min-height: 92px;
+    }
+
+    .diagram-note-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .diagram-note {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-2);
+      padding: 9px;
+      color: var(--tx-3);
+      font-size: 12px;
+    }
+
+    .sandbox-map {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.85fr) minmax(0, 1.6fr);
+      gap: 12px;
+    }
+
+    .sandbox-rail {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .sandbox-shell {
+      border: 1px solid var(--acc-line);
+      border-radius: 10px;
+      background: rgba(53, 208, 143, 0.06);
+      padding: 10px;
+    }
+
+    .sandbox-shell h3 {
+      color: var(--acc);
+      margin-bottom: 10px;
+    }
+
+    .sandbox-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .sandbox-cell {
+      min-height: 74px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-inset);
+      padding: 9px;
+    }
+
+    .sandbox-cell strong {
+      display: block;
+      color: var(--tx);
+      font-size: 13px;
+      margin-bottom: 5px;
+    }
+
+    .sandbox-cell span {
+      color: var(--tx-3);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .artifact-map {
+      display: grid;
+      gap: 10px;
+    }
+
+    .artifact-step {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr) minmax(0, 1fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .artifact-time {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-2);
+      color: var(--tx);
+      padding: 9px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .artifact-box {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-inset);
+      padding: 9px;
+      color: var(--tx-2);
+      font-size: 12px;
+    }
+
+    .artifact-box strong {
+      display: block;
+      color: var(--tx);
+      margin-bottom: 5px;
+      font-size: 12.5px;
+    }
+
+    .artifact-bundle {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .artifact-path {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-2);
+      padding: 9px;
+      color: var(--tx-2);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .artifact-path code {
+      color: var(--acc);
+    }
+
+    .state-map {
+      display: grid;
+      gap: 10px;
+    }
+
+    .state-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .state-node {
+      min-height: 60px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--bg-2);
+      padding: 9px;
+      color: var(--tx);
+      font-size: 13px;
+    }
+
+    .state-node span {
+      display: block;
+      margin-top: 4px;
+      color: var(--tx-3);
+      font-size: 11px;
+    }
+
+    .state-node.terminal {
+      border-color: rgba(53, 208, 143, 0.28);
+      background: rgba(53, 208, 143, 0.08);
+    }
+
+    .state-node.fail {
+      border-color: rgba(248, 113, 113, 0.3);
+      background: rgba(248, 113, 113, 0.08);
+    }
+
+    .state-rules {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
     ul,
     ol {
       margin: 0;
@@ -517,14 +790,35 @@
         grid-template-columns: 1fr;
       }
 
-      .kpis {
-        grid-template-columns: 1fr;
-      }
+	      .kpis {
+	        grid-template-columns: 1fr;
+	      }
 
-      .env-state {
-        justify-self: start;
-      }
-    }
+	      .diagram-title {
+	        align-items: flex-start;
+	        flex-direction: column;
+	      }
+
+	      .runtime-row,
+	      .runtime-row.secondary,
+	      .sandbox-map,
+	      .artifact-step,
+	      .artifact-bundle,
+	      .state-row,
+	      .state-rules,
+	      .diagram-note-grid {
+	        grid-template-columns: 1fr;
+	      }
+
+	      .diagram-arrow {
+	        min-height: 24px;
+	        transform: rotate(90deg);
+	      }
+
+	      .env-state {
+	        justify-self: start;
+	      }
+	    }
   </style>
 </head>
 <body>
@@ -617,66 +911,128 @@
 
         <section id="architecture" class="grid">
           <div class="card span-12">
-            <h2>Phase 1 architecture</h2>
-            <pre class="diagram">Dashboard / CLI / API
-        |
-        v
-+--------------------+       +----------------------+
-| Control API        |------>| Run Store            |
-| POST /v1/runs      |       | Postgres test schema |
-| cancel run         |       | ordered events       |
-+---------+----------+       +----------+-----------+
-          |                             ^
-          v                             |
-+--------------------+                  |
-| Worker             |------------------+
-| claim run          |
-| renew run lease    |
-| credential boundary|
-| cleanup finally    |
-+----+----------+----+
-     |          |
-     |          v
-     |   +------------------+
-     |   | R2 Artifact Store|
-     |   | session archive |
-     |   | files + logs    |
-     |   +------------------+
-     v
-+--------------------+
-| Daytona Sandbox    |
-| sidecar + heartbeat|
-| runtime adapter    |
-| codex first        |
-| claude parity 1B   |
-+--------------------+</pre>
+            <div class="diagram-title">
+              <h2>Runtime architecture</h2>
+              <span class="diagram-label">high level</span>
+            </div>
+            <div class="runtime-map" aria-label="High-level AgentRouter runtime architecture">
+              <div class="runtime-row">
+                <div class="diagram-node">
+                  <div class="node-kicker">caller</div>
+                  <strong>SDK, CLI, Dashboard</strong>
+                  <span>Creates runs, streams events, restores sessions, downloads artifacts.</span>
+                </div>
+                <div class="diagram-arrow" aria-hidden="true">→</div>
+                <div class="diagram-node accent">
+                  <div class="node-kicker">control plane</div>
+                  <strong>AgentRouter API</strong>
+                  <span>Validates runtime config, stores run intent, exposes stream and session endpoints.</span>
+                </div>
+                <div class="diagram-arrow" aria-hidden="true">→</div>
+                <div class="diagram-node info">
+                  <div class="node-kicker">ledger</div>
+                  <strong>Postgres</strong>
+                  <span>Runs, attempts, event cursor, sandbox session, artifact index, cleanup state.</span>
+                </div>
+              </div>
+              <div class="runtime-row secondary">
+                <div class="diagram-node warn">
+                  <div class="node-kicker">executor</div>
+                  <strong>Worker loop</strong>
+                  <span>Claims queued work, owns secrets, starts sandboxes, launches the selected provider.</span>
+                </div>
+                <div class="diagram-arrow" aria-hidden="true">→</div>
+                <div class="diagram-node accent">
+                  <div class="node-kicker">isolated runtime</div>
+                  <strong>Daytona sandbox</strong>
+                  <span>Scratch repo, Codex or Claude Code, sandbox-local shell/file/git tools.</span>
+                </div>
+                <div class="diagram-arrow" aria-hidden="true">→</div>
+                <div class="diagram-node">
+                  <div class="node-kicker">archive</div>
+                  <strong>Cloudflare R2</strong>
+                  <span>Compressed logs, workspace patch, file index, manifest, restore bundle.</span>
+                </div>
+              </div>
+            </div>
+            <div class="diagram-note-grid">
+              <div class="diagram-note">The API never runs agent code; it creates durable intent and serves replayable state.</div>
+              <div class="diagram-note">The worker is the only process allowed to touch provider keys and Daytona lifecycle.</div>
+              <div class="diagram-note">The sandbox is disposable; Postgres and R2 are the source of truth after cleanup.</div>
+            </div>
           </div>
           <div class="card span-7">
-            <h2>Run state machine</h2>
-            <pre class="diagram">+--------+    +----------+    +---------+    +-----------+
-| queued |--->| starting |--->| running |--->| completed |
-+---+----+    +----+-----+    +----+----+    +-----------+
-    |              |               |
-    | cancel       | cancel        | cancel
-    v              v               v
-+--------------------------------------------------------+
-| cancelling                                             |
-+----------------------------+---------------------------+
-                             |
-                             | cleanup done
-                             v
-                       +-----------+
-                       | cancelled |
-                       +-----------+
-
-starting --launch failure---------------------------> failed
-running  --adapter exit non-zero-------------------> failed
-running  --heartbeat stale -> recovering cleanup --> failed
-
-Terminal states: completed, failed, cancelled.</pre>
+            <div class="diagram-title">
+              <h2>Sandbox and agent execution</h2>
+              <span class="diagram-label">zoom in</span>
+            </div>
+            <div class="sandbox-map" aria-label="How the worker, Daytona sandbox, and agent runtime work together">
+              <div class="sandbox-rail">
+                <div class="diagram-node warn">
+                  <div class="node-kicker">worker</div>
+                  <strong>Claim + prepare</strong>
+                  <span>Create attempt, cleanup intent, Daytona session, scratch git repo.</span>
+                </div>
+                <div class="diagram-node">
+                  <div class="node-kicker">credential boundary</div>
+                  <strong>Scoped provider env</strong>
+                  <span>Inject only the provider process env; never general sandbox env or argv.</span>
+                </div>
+                <div class="diagram-node info">
+                  <div class="node-kicker">liveness</div>
+                  <strong>Heartbeat + TTL</strong>
+                  <span>Keep long runs alive while the worker renews leases and records progress.</span>
+                </div>
+              </div>
+              <div class="sandbox-shell">
+                <h3>Inside Daytona</h3>
+                <div class="sandbox-grid">
+                  <div class="sandbox-cell">
+                    <strong>Scratch repo</strong>
+                    <span>Fresh git workspace with no host mounts, baseline commit, and isolated home.</span>
+                  </div>
+                  <div class="sandbox-cell">
+                    <strong>Runtime adapter</strong>
+                    <span>Maps <span class="mono">codex()</span> or <span class="mono">claudeCode()</span> to audited CLI flags.</span>
+                  </div>
+                  <div class="sandbox-cell">
+                    <strong>Agent process</strong>
+                    <span>Codex or Claude Code runs headless, emits normalized stdout, stderr, and provider events.</span>
+                  </div>
+                  <div class="sandbox-cell">
+                    <strong>Built-in tools</strong>
+                    <span>Shell, file, git, search, and review behavior stay inside the sandbox filesystem.</span>
+                  </div>
+                  <div class="sandbox-cell">
+                    <strong>Workspace writes</strong>
+                    <span>Created, modified, deleted, binary, nested, and executable-bit changes are collected.</span>
+                  </div>
+                  <div class="sandbox-cell">
+                    <strong>Cleanup</strong>
+                    <span>Stop/delete sandbox after terminal state or cancellation; recover stale attempts later.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="card span-5">
-            <h2>Why it exists</h2>
+            <div class="diagram-title">
+              <h2>Run states</h2>
+              <span class="diagram-label">control</span>
+            </div>
+            <div class="state-map" aria-label="Run state machine">
+              <div class="state-row">
+                <div class="state-node">queued<span>API persisted intent</span></div>
+                <div class="state-node">starting<span>worker claimed run</span></div>
+                <div class="state-node">running<span>provider process active</span></div>
+                <div class="state-node terminal">completed<span>archive finalized</span></div>
+              </div>
+              <div class="state-rules">
+                <div class="state-node">cancelling<span>accepted from queued, starting, or running</span></div>
+                <div class="state-node terminal">cancelled<span>sandbox stopped and cleanup recorded</span></div>
+                <div class="state-node fail">failed<span>launch, provider, heartbeat, or upload failure</span></div>
+              </div>
+            </div>
             <ul>
               <li>Prevents impossible runs like <span class="mono">completed -> running</span>.</li>
               <li>Makes cancellation safe from queued, starting, or running.</li>
@@ -818,23 +1174,82 @@ Terminal states: completed, failed, cancelled.</pre>
             </ul>
           </div>
           <div class="card span-12">
-            <h2>Agent session archive</h2>
+            <div class="diagram-title">
+              <h2>Artifact storage lifecycle</h2>
+              <span class="diagram-label">zoom in</span>
+            </div>
             <p>
               In Phase 1, a run is the agent session. Postgres stores the session index and ordered replay cursor;
               R2 stores the session archive bytes. The archive is required, not optional, and must include every
               artifact needed to inspect or restore the run view after the Daytona sandbox is gone.
             </p>
-            <pre>dev/runs/&lt;runId&gt;/
-  session/manifest.json
-  session/events-000001.ndjson.gz
-  session/final-summary.json
-  logs/stdout/000001.ndjson.gz
-  logs/stderr/000001.ndjson.gz
-  workspace/diff.patch
-  workspace/file-index.json
-  workspace/files/&lt;sha256&gt;-&lt;safe-name&gt;
-  runtime/provider-metadata.json</pre>
+            <div class="artifact-map" aria-label="When artifacts are stored and what is stored">
+              <div class="artifact-step">
+                <div class="artifact-time">Run accepted</div>
+                <div class="artifact-box">
+                  <strong>Postgres</strong>
+                  <span class="mono">runs</span>, idempotency key, normalized runtime selection, queued status.
+                </div>
+                <div class="artifact-box">
+                  <strong>R2</strong>
+                  Nothing yet. No object is created before a worker claim exists.
+                </div>
+              </div>
+              <div class="artifact-step">
+                <div class="artifact-time">Worker claimed</div>
+                <div class="artifact-box">
+                  <strong>Postgres</strong>
+                  <span class="mono">run_attempts</span>, <span class="mono">sandbox_sessions</span>, cleanup intent, <span class="mono">run.claimed</span>.
+                </div>
+                <div class="artifact-box">
+                  <strong>R2</strong>
+                  Prefix reserved by convention: <span class="mono">dev/runs/&lt;runId&gt;/</span>.
+                </div>
+              </div>
+              <div class="artifact-step">
+                <div class="artifact-time">Agent running</div>
+                <div class="artifact-box">
+                  <strong>Postgres</strong>
+                  Ordered <span class="mono">run_events</span> with bounded payloads and artifact references.
+                </div>
+                <div class="artifact-box">
+                  <strong>R2</strong>
+                  Compressed stdout/stderr chunks and oversized event payload chunks as they cross limits.
+                </div>
+              </div>
+              <div class="artifact-step">
+                <div class="artifact-time">Provider exits</div>
+                <div class="artifact-box">
+                  <strong>Postgres</strong>
+                  Artifact metadata rows with checksums, sizes, content types, and redaction state.
+                </div>
+                <div class="artifact-box">
+                  <strong>R2</strong>
+                  Workspace patch, file index, selected workspace files, runtime metadata.
+                </div>
+              </div>
+              <div class="artifact-step">
+                <div class="artifact-time">Terminal state</div>
+                <div class="artifact-box">
+                  <strong>Postgres</strong>
+                  <span class="mono">completed</span>, <span class="mono">failed</span>, or <span class="mono">cancelled</span> status plus current manifest pointer.
+                </div>
+                <div class="artifact-box">
+                  <strong>R2</strong>
+                  Final or partial <span class="mono">session/manifest.json</span> that includes terminal snapshot.
+                </div>
+              </div>
+            </div>
+            <div class="artifact-bundle" aria-label="R2 artifact bundle">
+              <div class="artifact-path"><code>session/manifest.json</code><br>Canonical restore bundle: run, events, artifacts, checksums.</div>
+              <div class="artifact-path"><code>logs/stdout/000001.ndjson.gz</code><br>Compressed provider stdout with redaction metadata.</div>
+              <div class="artifact-path"><code>logs/stderr/000001.ndjson.gz</code><br>Compressed provider stderr, usually internal visibility.</div>
+              <div class="artifact-path"><code>workspace/changes.patch</code><br>Binary-safe patch after provider exit or cancellation.</div>
+              <div class="artifact-path"><code>workspace/file-index.json</code><br>Created, modified, deleted, nested, binary, and executable file inventory.</div>
+              <div class="artifact-path"><code>runtime/provider-metadata.json</code><br>CLI version, provider session ids, usage, warnings, terminal classifier.</div>
+            </div>
             <ul>
+              <li>The worker parses provider stdout once and writes a public <span class="mono">agent.response</span> event so SDK users do not download, gunzip, or parse provider JSONL.</li>
               <li><span class="mono">manifest.json</span> is the canonical session artifact: runtime kind, attempts, event range, checksums, byte sizes, file paths, redaction status, and artifact ids.</li>
               <li>Workspace artifacts include agent-created files, modified files, deleted-file records, executable-bit changes, binary files, nested directories, and explicit output paths.</li>
               <li>The collector does not upload <span class="mono">.git</span>, dependency caches, provider auth files, <span class="mono">.env</span>, or paths outside the checked-out workspace.</li>
@@ -1055,11 +1470,11 @@ Idempotency-Key: client-generated-id
               <tbody>
                 <tr>
                   <td class="mono">runAgent</td>
-                  <td>Create a run or resume an existing session by <span class="mono">sessionId</span>, wait, restore session, and return artifacts.</td>
+                  <td>Create a run or resume an existing session by <span class="mono">sessionId</span>, wait, and return <span class="mono">result.text</span> plus the restored raw session.</td>
                 </tr>
                 <tr>
                   <td class="mono">streamAgent</td>
-                  <td>Create a run and consume normalized events as an async iterable.</td>
+                  <td>Create a run and consume <span class="mono">textStream</span> for user-visible output or <span class="mono">events</span> for advanced debugging.</td>
                 </tr>
                 <tr>
                   <td class="mono">agentrouter</td>
@@ -1080,14 +1495,14 @@ const ar = agentrouter({
   apiKey: process.env.AGENTROUTER_API_KEY
 });
 
-const session = await runAgent({
+const result = await runAgent({
   client: ar,
   task: "Create reports/agent-smoke.txt with a short status note",
   runtime: codex({ mode: "default", model: "gpt-4o" })
 });
 
-console.log(session.run.status);
-console.log(session.artifacts.items);</pre>
+console.log(result.status);
+console.log(result.text);</pre>
           </div>
           <div class="card span-6">
             <h2>Streaming path</h2>
@@ -1103,17 +1518,18 @@ const stream = await streamAgent({
   runtime: codex({ mode: "read_only", model: "gpt-4o" })
 });
 
-for await (const event of stream.events) {
-  console.log(event.sequence, event.type);
+for await (const textPart of stream.textStream) {
+  process.stdout.write(textPart);
 }
 
-const session = await stream.finalSession;
-console.log(session.artifactManifest.status);</pre>
+const result = await stream.finalResult;
+console.log(result.status);</pre>
           </div>
           <div class="card span-12">
             <h2>Ergonomics rules</h2>
             <ul>
               <li>The README leads with <span class="mono">runAgent</span> and <span class="mono">streamAgent</span>, not raw REST resources.</li>
+              <li>The common output is first-class: <span class="mono">runAgent</span> returns <span class="mono">result.text</span>, and <span class="mono">streamAgent</span> exposes <span class="mono">textStream</span>.</li>
               <li><span class="mono">codex()</span> and <span class="mono">claudeCode()</span> return provider-neutral runtime selections; they do not expose raw CLI flags.</li>
               <li>No repo URL or workspace attachment appears in the Phase 1 public API. Every run starts in a fresh scratch workspace.</li>
               <li><span class="mono">agentrouter()</span> is transport configuration only: base URL, API key provider, fetch implementation, retry policy, and hooks.</li>
@@ -1339,13 +1755,14 @@ const tool = await ar.tools.register({
               client rebuilds the view from Postgres events and R2 artifact metadata, then resumes streaming from
               the last event sequence it has seen.
             </p>
-            <pre>const session = await runAgent({
+            <pre>const result = await runAgent({
   client: ar,
   sessionId: "run_...",
   afterSeq: lastSeenEventSeq
 });
 
-console.log(session.artifactManifest.status, session.artifacts.items.length);</pre>
+console.log(result.text);
+console.log(result.session.artifactManifest.status);</pre>
             <div class="chips">
               <span class="chip ok">GET /v1/runs</span>
               <span class="chip ok">GET /v1/runs/{id}/session</span>

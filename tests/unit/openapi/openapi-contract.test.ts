@@ -37,6 +37,8 @@ describe("OpenAPI Phase 1 contract", () => {
     expect(spec).toMatch(
       /Run:[\s\S]*?runtime:\n\s+\$ref: "#\/components\/schemas\/ResolvedRuntimeSelection"/
     );
+    expect(spec).toMatch(/RunSession:[\s\S]*?response:\n\s+anyOf:/);
+    expect(spec).toContain("AgentResponse");
   });
 
   it("does not expose workspace attachment in the Phase 1 create-run contract", () => {

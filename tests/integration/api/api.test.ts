@@ -4,7 +4,12 @@ import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
-import { applyPhase1Migrations, dropSchema } from "@agentrouter/db";
+import {
+  RunRepository,
+  applyPhase1Migrations,
+  dropSchema,
+  withSearchPath
+} from "@agentrouter/db";
 
 loadDotEnv();
 
@@ -132,7 +137,8 @@ describe("AgentRouter API", () => {
     expect(sessionResponse.json()).toMatchObject({
       run: { id: created.id, status: "queued" },
       eventCursor: { lastEventSeq: 0 },
-      artifactManifest: { status: "missing" }
+      artifactManifest: { status: "missing" },
+      response: null
     });
 
     const streamResponse = await server.inject({
@@ -155,6 +161,58 @@ describe("AgentRouter API", () => {
     expect(cancelResponse.json()).toMatchObject({
       id: created.id,
       status: "cancelling"
+    });
+  });
+
+  it("restores the normalized final agent response from session", async () => {
+    const createResponse = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Explain the repo",
+        runtime: { kind: "codex", mode: "default" }
+      }
+    });
+    const created = createResponse.json();
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.appendEvent({
+          runId: created.id,
+          source: "worker",
+          eventType: "agent.response",
+          visibility: "public",
+          payload: {
+            text: "The agent final answer",
+            parts: [{ type: "text", text: "The agent final answer" }],
+            provider: "codex"
+          }
+        });
+        await repo.updateRunStatus(created.id, "starting");
+        await repo.updateRunStatus(created.id, "running");
+        await repo.updateRunStatus(created.id, "completed");
+      });
+    } finally {
+      client.release();
+    }
+
+    const sessionResponse = await server.inject({
+      method: "GET",
+      url: `/v1/runs/${created.id}/session`,
+      headers: authHeaders(config.apiKey)
+    });
+
+    expect(sessionResponse.statusCode).toBe(200);
+    expect(sessionResponse.json()).toMatchObject({
+      run: { id: created.id, status: "completed" },
+      response: {
+        text: "The agent final answer",
+        parts: [{ type: "text", text: "The agent final answer" }],
+        provider: "codex"
+      }
     });
   });
 
@@ -218,7 +276,7 @@ describe("AgentRouter API", () => {
     });
   });
 
-  it("rejects Phase 1B runtime requests before worker claim", async () => {
+  it("creates a Claude Code run with provider-specific permission mode and model", async () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/runs",
@@ -229,10 +287,20 @@ describe("AgentRouter API", () => {
       }
     });
 
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(201);
     expect(response.json()).toMatchObject({
-      error: {
-        code: "unsupported_runtime_kind"
+      status: "queued",
+      runtime: {
+        kind: "claude_code",
+        permissionMode: "acceptEdits",
+        model: "claude-sonnet-4-6"
+      },
+      input: {
+        runtime: {
+          kind: "claude_code",
+          permissionMode: "acceptEdits",
+          model: "claude-sonnet-4-6"
+        }
       }
     });
   });

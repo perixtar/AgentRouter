@@ -1,13 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { R2ArtifactStore } from "@agentrouter/artifacts-r2";
-import { buildProviderProcessEnv, scanForCredentialCanaries } from "@agentrouter/credential-boundary";
+import { extractAgentResponseFromStdout } from "@agentrouter/core";
+import {
+  buildProviderProcessEnv,
+  redactCredentialCanaries,
+  scanForCredentialCanaries
+} from "@agentrouter/credential-boundary";
 import {
   RunRepository,
+  isClaudeCodeRunRecord,
   isCodexRunRecord,
   type RunRecord,
   withSearchPath
 } from "@agentrouter/db";
+import { buildClaudeCodeLaunchPlan } from "@agentrouter/runtime-claude-code";
 import { buildCodexLaunchPlan } from "@agentrouter/runtime-codex-cli";
 
 export interface WorkerSandboxDriver {
@@ -30,7 +37,8 @@ export interface RunOneWorkerIterationInput {
   sandbox: WorkerSandboxDriver;
   artifactStore: R2ArtifactStore;
   testResourcePrefix: string;
-  codexApiKey: string;
+  codexApiKey?: string;
+  anthropicApiKey?: string;
   baseEnv: NodeJS.ProcessEnv;
 }
 
@@ -107,24 +115,7 @@ async function executeClaimedRun(
   let stderr = "";
 
   try {
-    if (!isCodexRunRecord(run)) {
-      throw new Error(`Unsupported runtime kind for Phase 1A worker: ${run.runtimeKind}`);
-    }
-
-    const credentialBoundary = buildProviderProcessEnv({
-      provider: "codex",
-      rawProviderKey: input.codexApiKey,
-      baseEnv: input.baseEnv
-    });
-
-    const launchPlan = buildCodexLaunchPlan({
-      mode: run.runtimeMode,
-      model: run.runtimeModel,
-      task: taskFromRun(run),
-      workdir: repoDir,
-      providerEnv: credentialBoundary.providerEnv,
-      reviewBase: undefined
-    });
+    const runtime = buildRuntimeLaunch(input, run);
 
     await withClient(input, async (client) => {
       const repo = new RunRepository(client);
@@ -136,14 +127,14 @@ async function executeClaimedRun(
         runtimeKind: run.runtimeKind,
         runtimeMode: run.runtimeMode,
         runtimeModel: run.runtimeModel,
-        permissionProfile: { ...launchPlan.permissionProfile },
-        credentialStrategy: credentialBoundary.credentialStrategy
+        permissionProfile: { ...runtime.launchPlan.permissionProfile },
+        credentialStrategy: runtime.credentialBoundary.credentialStrategy
       });
     });
 
     const sandbox = await input.sandbox.createSandbox({
       name: sandboxName,
-      env: credentialBoundary.generalSandboxEnv
+      env: runtime.credentialBoundary.generalSandboxEnv
     });
     sandboxId = sandbox.id;
 
@@ -168,42 +159,68 @@ async function executeClaimedRun(
     });
 
     await requireSuccessfulCommand("workspace_setup", setupScratchWorkspace(input.sandbox, sandbox.id));
-    await ensureCodex(input.sandbox, sandbox.id);
+    await ensureProviderRuntime(input.sandbox, sandbox.id, runtime.provider);
 
-    const command = shellCommand(launchPlan.command, launchPlan.argv);
+    const command = shellCommand(runtime.launchPlan.command, runtime.launchPlan.argv);
     const result = await input.sandbox.executeCommand(sandbox.id, command, {
       cwd: repoDir,
-      env: providerRuntimeEnv(launchPlan.env),
+      env: providerRuntimeEnv(runtime.launchPlan.env),
       timeoutSeconds: 0
     });
-    stdout = redactSecrets(result.stdout, [input.codexApiKey]);
-    stderr = redactSecrets(result.stderr, [input.codexApiKey]);
-    assertNoCredentialLeaks(stdout + stderr, [input.codexApiKey]);
+    assertNoCredentialLeaks(
+      result.stdout + result.stderr,
+      runtime.credentialCanaries,
+      "provider output"
+    );
+    stdout = redactCredentialCanaries(result.stdout, runtime.credentialCanaries);
+    stderr = redactCredentialCanaries(result.stderr, runtime.credentialCanaries);
 
-    await appendOutputAndArtifacts(input, run.id, attemptId, stdout, stderr);
+    await appendOutputAndArtifacts(input, run.id, attemptId, runtime.eventSource, stdout, stderr);
 
     const fileIndex = await collectWorkspaceFileIndex(input.sandbox, sandbox.id);
+    assertNoCredentialLeaks(
+      JSON.stringify(fileIndex),
+      runtime.credentialCanaries,
+      "workspace file index"
+    );
     await recordWorkspaceFileIndex(input, run.id, attemptId, fileIndex);
     const patch = await collectPatch(input.sandbox, sandbox.id);
+    assertNoCredentialLeaks(patch, runtime.credentialCanaries, "workspace patch");
     await recordPatchArtifact(input, run.id, attemptId, patch);
-    await recordSessionManifest(input, run.id, attemptId);
+
+    const failure =
+      result.exitCode === 0
+        ? undefined
+        : {
+            code: "provider_runtime_failed",
+            reason: providerFailureReason(runtime, result.exitCode, stdout, stderr)
+          };
+    const terminalSnapshot: TerminalRunSnapshot =
+      result.exitCode === 0
+        ? {
+            status: "completed",
+            eventType: "run.completed",
+            payload: { message: "completed" }
+          }
+        : {
+            status: "failed",
+            eventType: "run.failed",
+            payload: { exitCode: result.exitCode, reason: failure?.reason },
+            failure
+          };
+
+    await recordSessionManifest(input, run.id, attemptId, terminalSnapshot);
 
     await withClient(input, async (client) => {
       const repo = new RunRepository(client);
       await repo.appendEvent({
         runId: run.id,
         source: "worker",
-        eventType: result.exitCode === 0 ? "run.completed" : "run.failed",
+        eventType: terminalSnapshot.eventType,
         visibility: "public",
-        payload: result.exitCode === 0 ? { message: "completed" } : { exitCode: result.exitCode }
+        payload: terminalSnapshot.payload
       });
-      await repo.updateRunStatus(
-        run.id,
-        result.exitCode === 0 ? "completed" : "failed",
-        result.exitCode === 0
-          ? undefined
-          : { code: "provider_runtime_failed", reason: "Codex process exited non-zero" }
-      );
+      await repo.updateRunStatus(run.id, terminalSnapshot.status, terminalSnapshot.failure);
     });
   } catch (error) {
     await markRunFailed(input, run.id, error);
@@ -212,6 +229,171 @@ async function executeClaimedRun(
       await input.sandbox.deleteSandbox(sandboxId);
     }
   }
+}
+
+type RuntimeProvider = "codex" | "claude_code";
+
+interface WorkerLaunchPlan {
+  command: "codex" | "claude";
+  argv: string[];
+  env: Record<string, string>;
+  cwd: string;
+  permissionProfile: object;
+}
+
+interface RuntimeLaunch {
+  provider: RuntimeProvider;
+  displayName: string;
+  eventSource: string;
+  credentialBoundary: ReturnType<typeof buildProviderProcessEnv>;
+  credentialCanaries: string[];
+  launchPlan: WorkerLaunchPlan;
+}
+
+interface TerminalRunSnapshot {
+  status: "completed" | "failed";
+  eventType: "run.completed" | "run.failed";
+  payload: Record<string, unknown>;
+  failure?: { code: string; reason: string };
+}
+
+function providerFailureReason(
+  runtime: RuntimeLaunch,
+  exitCode: number,
+  stdout: string,
+  stderr: string
+): string {
+  const structuredReason = extractStructuredProviderError(stdout);
+  const stderrReason = firstNonEmptyLine(stderr);
+  const detail = structuredReason ?? stderrReason;
+  if (!detail) {
+    return `${runtime.displayName} process exited non-zero with exit code ${exitCode}`;
+  }
+
+  return `${runtime.displayName} process exited non-zero: ${truncateFailureDetail(detail)}`;
+}
+
+function extractStructuredProviderError(output: string): string | undefined {
+  for (const line of output.split(/\r?\n/).reverse()) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+
+    const event = parseJsonObject(trimmed);
+    if (!event) continue;
+
+    if (event.type === "result" && event.is_error === true && typeof event.result === "string") {
+      return event.result;
+    }
+
+    if (typeof event.error === "string") {
+      const message = extractMessageText(event);
+      return message ? `${event.error}: ${message}` : event.error;
+    }
+  }
+
+  return undefined;
+}
+
+function extractMessageText(event: Record<string, unknown>): string | undefined {
+  const message = event.message;
+  if (!message || typeof message !== "object") return undefined;
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+
+  for (const item of content) {
+    if (item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string") {
+      return (item as { text: string }).text;
+    }
+  }
+
+  return undefined;
+}
+
+function parseJsonObject(line: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function firstNonEmptyLine(text: string): string | undefined {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+}
+
+function truncateFailureDetail(detail: string): string {
+  const compact = detail.replace(/\s+/g, " ").trim();
+  return compact.length > 500 ? `${compact.slice(0, 497)}...` : compact;
+}
+
+function buildRuntimeLaunch(
+  input: RunOneWorkerIterationInput,
+  run: RunRecord
+): RuntimeLaunch {
+  if (isCodexRunRecord(run)) {
+    if (!input.codexApiKey) {
+      throw new Error("Missing CODEX_API_KEY or OPENAI_API_KEY for Codex runtime");
+    }
+
+    const credentialBoundary = buildProviderProcessEnv({
+      provider: "codex",
+      rawProviderKey: input.codexApiKey,
+      baseEnv: input.baseEnv
+    });
+    const launchPlan = buildCodexLaunchPlan({
+      mode: run.runtimeMode,
+      model: run.runtimeModel,
+      task: taskFromRun(run),
+      workdir: repoDir,
+      providerEnv: credentialBoundary.providerEnv,
+      reviewBase: undefined
+    });
+
+    return {
+      provider: "codex",
+      displayName: "Codex",
+      eventSource: "codex",
+      credentialBoundary,
+      credentialCanaries: [input.codexApiKey],
+      launchPlan
+    };
+  }
+
+  if (isClaudeCodeRunRecord(run)) {
+    if (!input.anthropicApiKey) {
+      throw new Error("Missing ANTHROPIC_API_KEY for Claude Code runtime");
+    }
+
+    const credentialBoundary = buildProviderProcessEnv({
+      provider: "claude_code",
+      rawProviderKey: input.anthropicApiKey,
+      baseEnv: input.baseEnv
+    });
+    const launchPlan = buildClaudeCodeLaunchPlan({
+      permissionMode: run.runtimeMode,
+      model: run.runtimeModel,
+      task: taskFromRun(run),
+      workdir: repoDir,
+      providerEnv: credentialBoundary.providerEnv
+    });
+
+    return {
+      provider: "claude_code",
+      displayName: "Claude Code",
+      eventSource: "claude_code",
+      credentialBoundary,
+      credentialCanaries: [input.anthropicApiKey],
+      launchPlan
+    };
+  }
+
+  throw new Error(`Unsupported runtime kind: ${run.runtimeKind}`);
 }
 
 async function setupScratchWorkspace(
@@ -250,6 +432,36 @@ async function ensureCodex(sandbox: WorkerSandboxDriver, sandboxId: string): Pro
   }
 }
 
+async function ensureClaudeCode(sandbox: WorkerSandboxDriver, sandboxId: string): Promise<void> {
+  const result = await sandbox.executeCommand(
+    sandboxId,
+    [
+      "CLAUDE_PREFIX=/home/daytona/.agentrouter-claude/npm-global",
+      "mkdir -p \"$CLAUDE_PREFIX\"",
+      "export NPM_CONFIG_PREFIX=\"$CLAUDE_PREFIX\"",
+      "export PATH=\"$CLAUDE_PREFIX/bin:$PATH\"",
+      "if [ ! -x \"$CLAUDE_PREFIX/bin/claude\" ] || ! \"$CLAUDE_PREFIX/bin/claude\" --help 2>&1 | grep -q -- '--bare'; then npm install -g @anthropic-ai/claude-code@latest; fi"
+    ].join(" && "),
+    { timeoutSeconds: 0 }
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`claude_bootstrap failed: ${result.stdout}${result.stderr}`);
+  }
+}
+
+async function ensureProviderRuntime(
+  sandbox: WorkerSandboxDriver,
+  sandboxId: string,
+  provider: RuntimeProvider
+): Promise<void> {
+  if (provider === "claude_code") {
+    await ensureClaudeCode(sandbox, sandboxId);
+    return;
+  }
+
+  await ensureCodex(sandbox, sandboxId);
+}
+
 async function requireSuccessfulCommand(
   step: string,
   commandResultPromise: Promise<{ exitCode: number; stdout: string; stderr: string }>
@@ -264,6 +476,7 @@ async function appendOutputAndArtifacts(
   input: RunOneWorkerIterationInput,
   runId: string,
   attemptId: string,
+  providerSource: string,
   stdout: string,
   stderr: string
 ): Promise<void> {
@@ -312,7 +525,7 @@ async function appendOutputAndArtifacts(
     });
     await repo.appendEvent({
       runId,
-      source: "codex",
+      source: providerSource,
       eventType: "provider.stdout",
       visibility: "public",
       payload: { text: stdout },
@@ -320,12 +533,23 @@ async function appendOutputAndArtifacts(
     });
     await repo.appendEvent({
       runId,
-      source: "codex",
+      source: providerSource,
       eventType: "provider.stderr",
       visibility: "internal",
       payload: { text: stderr },
       artifactRef: { artifactId: stderrRecord.id, r2Key: stderrRecord.r2Key }
     });
+
+    const response = extractAgentResponseFromStdout(stdout);
+    if (response) {
+      await repo.appendEvent({
+        runId,
+        source: providerSource,
+        eventType: "agent.response",
+        visibility: "public",
+        payload: { ...response, provider: providerSource }
+      });
+    }
   });
 }
 
@@ -344,7 +568,7 @@ async function collectWorkspaceFileIndex(
 ): Promise<Array<{ status: string; path: string }>> {
   const result = await sandbox.executeCommand(
     sandboxId,
-    "git status --porcelain=v1 -z",
+    "git status --porcelain=v1 -z --untracked-files=all",
     { cwd: repoDir, timeoutSeconds: 0 }
   );
 
@@ -438,27 +662,36 @@ async function recordPatchArtifact(
 async function recordSessionManifest(
   input: RunOneWorkerIterationInput,
   runId: string,
-  attemptId: string
+  attemptId: string,
+  terminalSnapshot: TerminalRunSnapshot
 ): Promise<void> {
   const manifest = await withClient(input, async (client) => {
     const repo = new RunRepository(client);
     const run = await repo.getRun(runId);
     const events = await repo.listEvents({ runId, limit: 500 });
     const artifacts = await repo.listArtifacts(runId);
+    const lastEventSeq = events.at(-1)?.sequence ?? run?.lastEventSeq ?? 0n;
     return {
       run: {
         id: run?.id,
-        status: run?.status,
+        status: terminalSnapshot.status,
         runtimeKind: run?.runtimeKind,
         runtimeMode: run?.runtimeMode,
         runtimeModel: run?.runtimeModel,
-        lastEventSeq: run ? Number(run.lastEventSeq) : 0
+        lastEventSeq: Number(lastEventSeq + 1n),
+        failure: terminalSnapshot.failure
       },
-      events: events.map((event) => ({
-        sequence: Number(event.sequence),
-        type: event.eventType,
-        artifactRef: event.artifactRef
-      })),
+      events: [
+        ...events.map((event) => ({
+          sequence: Number(event.sequence),
+          type: event.eventType,
+          artifactRef: event.artifactRef
+        })),
+        {
+          sequence: Number(lastEventSeq + 1n),
+          type: terminalSnapshot.eventType
+        }
+      ],
       artifacts: artifacts.map((artifact) => ({
         id: artifact.id,
         kind: artifact.kind,
@@ -541,23 +774,20 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function redactSecrets(value: string, secrets: string[]): string {
-  return secrets.reduce((output, secret) => output.replaceAll(secret, "[REDACTED]"), value);
-}
-
-function assertNoCredentialLeaks(output: string, secrets: string[]): void {
+function assertNoCredentialLeaks(output: string, secrets: string[], surface: string): void {
   const leaked = scanForCredentialCanaries(output, secrets);
   if (leaked.length > 0) {
-    throw new Error("Credential canary leaked through provider output");
+    throw new Error(`Credential canary leaked through ${surface}`);
   }
 }
 
 function providerRuntimeEnv(providerEnv: Record<string, string>): Record<string, string> {
   return {
-    PATH: "/usr/local/share/nvm/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    PATH: "/home/daytona/.agentrouter-claude/npm-global/bin:/usr/local/share/nvm/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     SHELL: "/bin/sh",
     HOME: "/home/daytona",
     CODEX_HOME: "/home/daytona/.agentrouter-codex",
+    CLAUDE_CONFIG_DIR: "/home/daytona/.agentrouter-claude",
     ...providerEnv
   };
 }

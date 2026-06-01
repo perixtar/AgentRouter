@@ -18,6 +18,7 @@
       "@agentrouter/sandbox-daytona": ["packages/sandbox/daytona/src/index.ts"],
       "@agentrouter/credential-boundary": ["packages/security/credential-boundary/src/index.ts"],
       "@agentrouter/runtime-codex-cli": ["packages/runtime/codex-cli/src/index.ts"],
+      "@agentrouter/runtime-claude-code": ["packages/runtime/claude-code/src/index.ts"],
       "@agentrouter/worker": ["packages/worker/src/index.ts"],
       "@agentrouter/api": ["apps/api/src/server.ts"],
       "@agentrouter/sdk": ["packages/sdk-typescript/src/index.ts"]

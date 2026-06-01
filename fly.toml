@@ -1,0 +1,38 @@
+app = "agentrouter-dev"
+primary_region = "sjc"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AGENTROUTER_PORT = "8787"
+  AGENTROUTER_DB_SCHEMA = "public"
+  AGENTROUTER_WORKER_POLL_INTERVAL_MS = "1000"
+  R2_REGION = "auto"
+  R2_ARTIFACT_PREFIX = "prod/runs/"
+
+[processes]
+  web = "pnpm api:start"
+  worker = "pnpm worker:start"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["web"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 100
+    hard_limit = 150
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"

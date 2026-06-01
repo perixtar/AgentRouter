@@ -9,6 +9,7 @@
     "@agentrouter/artifacts-r2": "workspace:*",
     "@agentrouter/credential-boundary": "workspace:*",
     "@agentrouter/db": "workspace:*",
+    "@agentrouter/runtime-claude-code": "workspace:*",
     "@agentrouter/runtime-codex-cli": "workspace:*",
     "pg": "^8.21.0"
   }

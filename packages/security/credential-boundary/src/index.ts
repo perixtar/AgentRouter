@@ -66,6 +66,13 @@ export function scanForCredentialCanaries(output: string, canaries: string[]): s
   return canaries.filter((canary) => canary.length > 0 && output.includes(canary));
 }
 
+export function redactCredentialCanaries(output: string, canaries: string[]): string {
+  return canaries.reduce(
+    (redacted, canary) => (canary.length > 0 ? redacted.replaceAll(canary, "[REDACTED]") : redacted),
+    output
+  );
+}
+
 function isDeniedEnvName(key: string): boolean {
   if (deniedExactNames.has(key)) return true;
   return deniedNamePatterns.some((pattern) => pattern.test(key));

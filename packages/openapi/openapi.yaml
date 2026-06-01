@@ -378,9 +378,30 @@ components:
         createdAt:
           type: string
           format: date-time
+    AgentResponse:
+      type: object
+      required: [text, parts]
+      properties:
+        text:
+          type: string
+        parts:
+          type: array
+          items:
+            type: object
+            required: [type, text]
+            properties:
+              type:
+                type: string
+                enum: [text]
+              text:
+                type: string
+        provider:
+          type: string
+        providerEventType:
+          type: string
     RunSession:
       type: object
-      required: [run, eventCursor, artifactManifest, artifacts]
+      required: [run, eventCursor, response, artifactManifest, artifacts]
       properties:
         run:
           $ref: "#/components/schemas/Run"
@@ -390,6 +411,10 @@ components:
           properties:
             lastEventSeq:
               type: integer
+        response:
+          anyOf:
+            - $ref: "#/components/schemas/AgentResponse"
+            - type: "null"
         artifactManifest:
           type: object
           additionalProperties: true

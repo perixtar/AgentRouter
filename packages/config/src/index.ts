@@ -3,7 +3,8 @@ import { z } from "zod";
 export interface AgentRouterConfig {
   apiKey: string;
   daytonaApiKey: string;
-  codexApiKey: string;
+  codexApiKey?: string;
+  anthropicApiKey?: string;
   databaseUrl: string;
   r2: {
     accountId: string;
@@ -21,10 +22,11 @@ export interface AgentRouterConfig {
 }
 
 const envSchema = z.object({
-  AGENTROUTER_API_KEY: z.string().min(1).optional(),
+  AGENTROUTER_API_KEY: z.string().min(1),
   DAYTONA_API_KEY: z.string().min(1),
   CODEX_API_KEY: z.string().min(1).optional(),
   OPENAI_API_KEY: z.string().min(1).optional(),
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
   DATABASE_URL: z.string().min(1),
   R2_ACCOUNT_ID: z.string().min(1),
   R2_ACCESS_KEY_ID: z.string().min(1),
@@ -42,15 +44,13 @@ const envSchema = z.object({
 export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig {
   const parsed = envSchema.parse(input);
   const codexApiKey = parsed.CODEX_API_KEY ?? parsed.OPENAI_API_KEY;
-
-  if (!codexApiKey) {
-    throw new Error("Missing CODEX_API_KEY or OPENAI_API_KEY for Phase 1A Codex runtime");
-  }
+  assertNonDefaultApiKey(parsed.AGENTROUTER_API_KEY);
 
   return {
-    apiKey: parsed.AGENTROUTER_API_KEY ?? "ar_dev_local_change_me",
+    apiKey: parsed.AGENTROUTER_API_KEY,
     daytonaApiKey: parsed.DAYTONA_API_KEY,
     codexApiKey,
+    anthropicApiKey: parsed.ANTHROPIC_API_KEY,
     databaseUrl: parsed.DATABASE_URL,
     r2: {
       accountId: parsed.R2_ACCOUNT_ID,
@@ -70,4 +70,10 @@ export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig
 
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
+}
+
+function assertNonDefaultApiKey(value: string): void {
+  if (value === "ar_dev_local_change_me") {
+    throw new Error("AGENTROUTER_API_KEY must be changed from the example development value");
+  }
 }

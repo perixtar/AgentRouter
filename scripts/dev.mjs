@@ -11,8 +11,8 @@ console.log("[dev] starting AgentRouter API and worker");
 start("api", ["api:dev"]);
 start("worker", ["worker:dev"]);
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown("received SIGINT"));
+process.on("SIGTERM", () => shutdown("received SIGTERM"));
 
 function start(label, args) {
   const child = spawn(pnpmBin, args, {
@@ -27,7 +27,7 @@ function start(label, args) {
   child.on("error", (error) => {
     if (shuttingDown) return;
     console.error(`[dev] ${label} failed to start: ${error.message}`);
-    shutdown();
+    shutdown("child failed to start");
     process.exitCode = 1;
   });
 
@@ -38,7 +38,7 @@ function start(label, args) {
     const reason = signal ? `signal ${signal}` : `code ${code ?? 0}`;
     console.error(`[dev] ${label} exited with ${reason}; stopping remaining processes`);
     process.exitCode = code ?? 1;
-    shutdown();
+    shutdown(`${label} exited with ${reason}`);
   });
 }
 
@@ -49,9 +49,10 @@ function pipeLines(label, stream) {
   });
 }
 
-function shutdown() {
+function shutdown(reason = "shutdown requested") {
   if (shuttingDown) return;
   shuttingDown = true;
+  console.error(`[dev] shutting down: ${reason}`);
 
   for (const child of children) {
     child.kill("SIGTERM");

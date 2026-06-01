@@ -10,9 +10,19 @@ loadDotEnv();
 describe("Codex provider smoke", () => {
   it("has a real Codex CLI and server-side API key available", async () => {
     const config = parseAgentRouterEnv(process.env);
-    expect(config.codexApiKey.length).toBeGreaterThan(10);
+    expect(config.codexApiKey?.length).toBeGreaterThan(10);
 
     const { stdout } = await execFileAsync("codex", ["--version"]);
     expect(stdout).toMatch(/codex/i);
+  });
+});
+
+describe("Claude Code provider smoke", () => {
+  it("has a real Claude Code CLI and server-side API key available", async () => {
+    const config = parseAgentRouterEnv(process.env);
+    expect(config.anthropicApiKey?.length).toBeGreaterThan(10);
+
+    const { stdout } = await execFileAsync("claude", ["--version"]);
+    expect(stdout).toMatch(/Claude Code/i);
   });
 });

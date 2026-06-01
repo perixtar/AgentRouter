@@ -32,6 +32,7 @@ const workerInput = {
   artifactStore: new R2ArtifactStore(config.r2),
   testResourcePrefix: config.testResourcePrefix,
   codexApiKey: config.codexApiKey,
+  anthropicApiKey: config.anthropicApiKey,
   baseEnv: process.env
 };
 

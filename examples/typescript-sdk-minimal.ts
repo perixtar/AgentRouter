@@ -18,7 +18,7 @@ const baseUrl =
   process.env.AGENTROUTER_API_BASE_URL ??
   process.env.AGENTROUTER_BASE_URL ??
   "http://127.0.0.1:8787";
-const apiKey = process.env.AGENTROUTER_API_KEY ?? "ar_dev_local_change_me";
+const apiKey = requireApiKey();
 const runtimeModel = process.env.AGENTROUTER_MODEL;
 
 const client = agentrouter({
@@ -29,7 +29,7 @@ const client = agentrouter({
 try {
   console.log(`Creating Codex run against ${baseUrl}`);
 
-  const session = await runAgent({
+  const result = await runAgent({
     client,
     task: "Reply exactly AR_CODEX_SDK_EXAMPLE_OK. Do not edit files.",
     runtime: codex({ mode: "default", ...(runtimeModel ? { model: runtimeModel } : {}) }),
@@ -38,17 +38,14 @@ try {
     onEvent: logEvent
   });
 
-  console.log(`Run ${session.run.id}: ${session.run.status}`);
-  console.log(`Last event sequence: ${session.eventCursor.lastEventSeq}`);
-  console.log(`Manifest: ${String(session.artifactManifest.status ?? "unknown")}`);
-  console.log(
-    `Artifacts: ${session.artifacts.items.map((artifact) => artifact.kind).join(", ") || "(none)"}`
-  );
+  console.log(`Run ${result.id}: ${result.status}`);
+  console.log(`Last event sequence: ${result.eventCursor.lastEventSeq}`);
+  console.log(`Agent response: ${result.text || "(no text response)"}`);
 
-  if (session.run.status !== "completed") {
-    console.error(`Run ended as ${session.run.status}`);
-    if (session.run.failure) {
-      console.error(JSON.stringify(session.run.failure, null, 2));
+  if (result.status !== "completed") {
+    console.error(`Run ended as ${result.status}`);
+    if (result.run.failure) {
+      console.error(JSON.stringify(result.run.failure, null, 2));
     }
     process.exitCode = 1;
   }
@@ -93,7 +90,15 @@ Run:
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787
-  AGENTROUTER_API_KEY=ar_dev_local_change_me
+  AGENTROUTER_API_KEY=<random-private-token>
   AGENTROUTER_MODEL=gpt-4o
 `);
+}
+
+function requireApiKey(): string {
+  const apiKey = process.env.AGENTROUTER_API_KEY;
+  if (!apiKey || apiKey === "ar_dev_local_change_me") {
+    throw new Error("Set AGENTROUTER_API_KEY to the private bearer token configured for the API");
+  }
+  return apiKey;
 }

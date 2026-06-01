@@ -15,13 +15,20 @@
     "test:daytona": "vitest run tests/integration/daytona",
     "test:providers:smoke": "vitest run tests/integration/providers",
     "test:e2e:codex": "AGENTROUTER_RUN_REAL_E2E=1 vitest run tests/e2e/codex-api-worker.test.ts",
+    "test:e2e:claude": "AGENTROUTER_RUN_REAL_E2E=1 vitest run tests/e2e/claude-api-worker.test.ts",
+    "test:claude:adapter": "vitest run tests/unit/runtime/claude-code-argv.test.ts",
+    "test:claude": "pnpm test:claude:adapter && pnpm test:providers:smoke",
     "dev": "node scripts/dev.mjs",
     "api:dev": "tsx apps/api/src/main.ts",
+    "api:start": "tsx apps/api/src/main.ts",
     "worker:run-once": "AGENTROUTER_WORKER_RUN_ONCE=1 tsx apps/worker/src/main.ts",
     "worker:dev": "tsx apps/worker/src/main.ts",
+    "worker:start": "tsx apps/worker/src/main.ts",
     "example:sdk": "tsx examples/typescript-sdk-minimal.ts",
     "example:run-agent": "tsx examples/run-agent.ts",
     "example:stream-agent": "tsx examples/stream-agent.ts",
+    "example:claude-code": "tsx examples/claude-code-run.ts",
+    "example:coding-agent-files": "tsx examples/coding-agent-files.ts",
     "example:create-tool": "tsx examples/tool-boundary.ts",
     "example:tool-boundary": "tsx examples/tool-boundary.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -41,5 +48,10 @@
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.0.6"
+  },
+  "pnpm": {
+    "overrides": {
+      "@opentelemetry/otlp-transformer@0.217.0>protobufjs": "8.5.0"
+    }
   }
 }

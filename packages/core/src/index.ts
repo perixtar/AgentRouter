@@ -55,6 +55,17 @@ export interface NormalizedEventPayload {
   artifactRef?: ArtifactRef;
 }
 
+export interface AgentResponseTextPart {
+  type: "text";
+  text: string;
+}
+
+export interface AgentResponse {
+  text: string;
+  parts: AgentResponseTextPart[];
+  providerEventType?: string;
+}
+
 const MAX_PAYLOAD_BYTES = 32 * 1024;
 const MAX_PUBLIC_TEXT_BYTES = 8 * 1024;
 
@@ -116,4 +127,81 @@ function truncateUtf8(value: string, maxBytes: number): string {
   }
 
   return output;
+}
+
+export function extractAgentResponseFromStdout(stdout: string): AgentResponse | undefined {
+  const responses: AgentResponse[] = [];
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const event = parseJsonLine(line);
+    if (!event) continue;
+
+    const text =
+      extractCodexAgentMessage(event) ??
+      extractClaudeAssistantMessage(event) ??
+      extractProviderResultMessage(event) ??
+      extractGenericProviderMessage(event);
+
+    if (text) {
+      responses.push({
+        text,
+        parts: [{ type: "text", text }],
+        providerEventType: typeof event.type === "string" ? event.type : undefined
+      });
+    }
+  }
+
+  return responses.at(-1);
+}
+
+function parseJsonLine(line: string): Record<string, unknown> | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractCodexAgentMessage(event: Record<string, unknown>): string | undefined {
+  if (event.type !== "item.completed") return undefined;
+  const item = event.item;
+  if (!item || typeof item !== "object") return undefined;
+  const typedItem = item as { type?: unknown; text?: unknown };
+  return typedItem.type === "agent_message" && typeof typedItem.text === "string"
+    ? typedItem.text
+    : undefined;
+}
+
+function extractClaudeAssistantMessage(event: Record<string, unknown>): string | undefined {
+  if (event.type !== "assistant") return undefined;
+  const message = event.message;
+  if (!message || typeof message !== "object") return undefined;
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+
+  const text = content
+    .map((item) =>
+      item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string"
+        ? (item as { text: string }).text
+        : ""
+    )
+    .filter(Boolean)
+    .join("\n");
+
+  return text || undefined;
+}
+
+function extractProviderResultMessage(event: Record<string, unknown>): string | undefined {
+  if (event.type !== "result" || event.is_error === true) return undefined;
+  return typeof event.result === "string" ? event.result : undefined;
+}
+
+function extractGenericProviderMessage(event: Record<string, unknown>): string | undefined {
+  return event.type === "message" && typeof event.message === "string" ? event.message : undefined;
 }

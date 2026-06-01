@@ -1,0 +1,11 @@
+{
+  "name": "@agentrouter/runtime-claude-code",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agentrouter/core": "workspace:*"
+  }
+}

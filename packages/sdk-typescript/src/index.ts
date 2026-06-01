@@ -76,11 +76,36 @@ export interface Artifact {
   createdAt: string;
 }
 
+export interface AgentResponseTextPart {
+  type: "text";
+  text: string;
+}
+
+export interface AgentResponse {
+  text: string;
+  parts: AgentResponseTextPart[];
+  provider?: string;
+  providerEventType?: string;
+}
+
 export interface RunSession {
   run: Run;
   eventCursor: { lastEventSeq: number };
+  response: AgentResponse | null;
   artifactManifest: Record<string, unknown>;
   artifacts: { items: Artifact[] };
+}
+
+export interface AgentRunResult {
+  id: string;
+  status: Run["status"];
+  text: string;
+  response: AgentResponse | null;
+  run: Run;
+  session: RunSession;
+  eventCursor: RunSession["eventCursor"];
+  artifactManifest: RunSession["artifactManifest"];
+  artifacts: RunSession["artifacts"];
 }
 
 export interface CreateAndWaitRequest extends CreateRunRequest {
@@ -140,7 +165,8 @@ export interface StreamAgentRequest extends CreateRunRequest {
 export interface AgentRunStream {
   run: Run;
   events: AsyncGenerator<RunEvent>;
-  finalSession: Promise<RunSession>;
+  textStream: AsyncGenerator<string>;
+  finalResult: Promise<AgentRunResult>;
 }
 
 export function agentrouter(options: AgentRouterOptions): AgentRouterClient {
@@ -155,15 +181,22 @@ export function claudeCode(options: ClaudeCodeRuntimeOptions = {}): ClaudeCodeRu
   return { kind: "claude_code", ...options };
 }
 
-export async function runAgent(input: RunAgentRequest): Promise<RunSession> {
+export async function runAgent(input: RunAgentRequest): Promise<AgentRunResult> {
   if (isRunAgentResumeRequest(input)) {
     const { client, sessionId, afterSeq, pollIntervalMs, maxWaitMs, onEvent } = input;
-    return waitForRunSession(client, sessionId, { afterSeq, pollIntervalMs, maxWaitMs, onEvent });
+    const session = await waitForRunSession(client, sessionId, {
+      afterSeq,
+      pollIntervalMs,
+      maxWaitMs,
+      onEvent
+    });
+    return toAgentRunResult(session);
   }
 
   if (isRunAgentCreateRequest(input)) {
     const { client, ...request } = input;
-    return client.createRunAndWait(request);
+    const session = await client.createRunAndWait(request);
+    return toAgentRunResult(session);
   }
 
   throw new AgentRouterError("invalid_run_agent_request", "runAgent requires either task or sessionId");
@@ -183,7 +216,10 @@ export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunSt
   return {
     run,
     events: streamRunEventsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
-    finalSession: waitForRunSession(client, run.id, { pollIntervalMs, maxWaitMs })
+    textStream: streamRunTextUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
+    finalResult: waitForRunSession(client, run.id, { pollIntervalMs, maxWaitMs }).then(
+      toAgentRunResult
+    )
   };
 }
 
@@ -430,6 +466,36 @@ async function waitForRunSession(
 
     await sleep(pollIntervalMs);
   }
+}
+
+function toAgentRunResult(session: RunSession): AgentRunResult {
+  return {
+    id: session.run.id,
+    status: session.run.status,
+    text: session.response?.text ?? "",
+    response: session.response,
+    run: session.run,
+    session,
+    eventCursor: session.eventCursor,
+    artifactManifest: session.artifactManifest,
+    artifacts: session.artifacts
+  };
+}
+
+async function* streamRunTextUntilTerminal(
+  client: AgentRouterClient,
+  runId: string,
+  options: { pollIntervalMs?: number; maxWaitMs?: number } = {}
+): AsyncGenerator<string> {
+  for await (const event of streamRunEventsUntilTerminal(client, runId, options)) {
+    const text = textFromAgentResponseEvent(event);
+    if (text) yield text;
+  }
+}
+
+function textFromAgentResponseEvent(event: RunEvent): string | undefined {
+  if (event.type !== "agent.response") return undefined;
+  return typeof event.payload.text === "string" ? event.payload.text : undefined;
 }
 
 async function* streamRunEventsUntilTerminal(
