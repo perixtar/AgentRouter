@@ -16,7 +16,7 @@ playwright-report/
 .playwright-cli/
 
 # Runtime artifacts
-artifacts/
+/artifacts/
 tmp/
 temp/
 *.log
