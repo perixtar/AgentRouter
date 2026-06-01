@@ -39,3 +39,38 @@ jobs:
         run: flyctl deploy --remote-only --config fly.toml --app "$FLY_APP_NAME"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Ensure primary worker is running
+        run: |
+          primary_worker_ids="$(
+            flyctl machine list --app "$FLY_APP_NAME" --json \
+              | jq -r '.[] | select(.config.metadata.fly_process_group == "worker" and (.config.standbys == null)) | .id'
+          )"
+
+          if [ -z "$primary_worker_ids" ]; then
+            echo "No primary worker machine found."
+            exit 1
+          fi
+
+          for machine_id in $primary_worker_ids; do
+            state="$(
+              flyctl machine list --app "$FLY_APP_NAME" --json \
+                | jq -r --arg id "$machine_id" '.[] | select(.id == $id) | .state'
+            )"
+
+            if [ "$state" != "started" ]; then
+              flyctl machine start "$machine_id" --app "$FLY_APP_NAME"
+            fi
+          done
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Verify deployed runtime
+        run: |
+          curl --fail --show-error --silent --retry 10 --retry-delay 3 "https://${FLY_APP_NAME}.fly.dev/healthz"
+          flyctl machine list --app "$FLY_APP_NAME" --json \
+            | jq -e 'any(.[]; .config.metadata.fly_process_group == "web" and .state == "started")'
+          flyctl machine list --app "$FLY_APP_NAME" --json \
+            | jq -e 'any(.[]; .config.metadata.fly_process_group == "worker" and (.config.standbys == null) and .state == "started")'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
