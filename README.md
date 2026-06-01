@@ -2,6 +2,8 @@
 
 Phase 1 runtime control plane for launching coding agents in Daytona sandboxes, storing run state in Postgres, and archiving logs/session artifacts in Cloudflare R2.
 
+Design docs live in `docs/`, including `docs/phase1-runtime-plan.html`.
+
 ## Phase 1 Quickstart
 
 1. Fill `.env` from `.env.example` with real Daytona, OpenAI/Codex, Postgres, and R2 credentials.
@@ -11,19 +13,22 @@ Phase 1 runtime control plane for launching coding agents in Daytona sandboxes, 
 pnpm install
 ```
 
-3. Start the API:
+3. Start the local control plane and worker:
+
+```sh
+pnpm dev
+```
+
+This starts the API and worker as separate local processes. The API accepts run requests; the worker claims queued runs, creates Daytona sandboxes, and launches Codex inside them.
+
+If you need to run them separately:
 
 ```sh
 pnpm api:dev
-```
-
-4. Start a worker in another terminal:
-
-```sh
 pnpm worker:dev
 ```
 
-5. Create a run through the API:
+4. Create a run through the API:
 
 ```sh
 curl -sS http://127.0.0.1:8787/v1/runs \

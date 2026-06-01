@@ -15,6 +15,7 @@
     "test:daytona": "vitest run tests/integration/daytona",
     "test:providers:smoke": "vitest run tests/integration/providers",
     "test:e2e:codex": "AGENTROUTER_RUN_REAL_E2E=1 vitest run tests/e2e/codex-api-worker.test.ts",
+    "dev": "node scripts/dev.mjs",
     "api:dev": "tsx apps/api/src/main.ts",
     "worker:run-once": "AGENTROUTER_WORKER_RUN_ONCE=1 tsx apps/worker/src/main.ts",
     "worker:dev": "tsx apps/worker/src/main.ts",

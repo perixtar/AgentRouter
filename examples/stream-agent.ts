@@ -50,8 +50,11 @@ Creates a Codex run, streams normalized events until the run is terminal, then
 prints the restored session and artifacts.
 
 Prerequisites:
-  1. pnpm api:dev
-  2. pnpm worker:dev
+  pnpm dev
+
+Or run the processes separately:
+  pnpm api:dev
+  pnpm worker:dev
 
 Run:
   pnpm example:stream-agent

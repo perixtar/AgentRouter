@@ -1,14 +1,15 @@
 # Examples
 
-Start the API:
+Start the local API and worker:
+
+```sh
+pnpm dev
+```
+
+This keeps the API and worker as separate local processes, but runs both from one command. To run them separately:
 
 ```sh
 pnpm api:dev
-```
-
-Start the worker in another terminal for examples that run an agent:
-
-```sh
 pnpm worker:dev
 ```
 

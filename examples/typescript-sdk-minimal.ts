@@ -82,8 +82,11 @@ function printHelp(): void {
   console.log(`AgentRouter TypeScript SDK minimal example
 
 Prerequisites:
-  1. pnpm api:dev
-  2. pnpm worker:dev
+  pnpm dev
+
+Or run the processes separately:
+  pnpm api:dev
+  pnpm worker:dev
 
 Run:
   pnpm example:sdk

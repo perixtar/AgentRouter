@@ -78,6 +78,9 @@ sandbox tools only. User-defined tools should be registered through the future
 AgentRouter MCP Gateway, not passed as raw functions into the sandbox.
 
 Prerequisite:
+  pnpm dev
+
+Or run only the API:
   pnpm api:dev
 
 Run:

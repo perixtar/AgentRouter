@@ -55,8 +55,11 @@ Creates a Codex run and waits for the restored session. To resume an existing
 run instead of creating a new one, set AGENTROUTER_SESSION_ID.
 
 Prerequisites:
-  1. pnpm api:dev
-  2. pnpm worker:dev
+  pnpm dev
+
+Or run the processes separately:
+  pnpm api:dev
+  pnpm worker:dev
 
 Run:
   pnpm example:run-agent
