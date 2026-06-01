@@ -94,6 +94,8 @@ R2_ENDPOINT
 ```
 
 The CI jobs create their own Postgres service and use a per-job R2 artifact prefix.
+Claude Code E2E is wired but gated by the `RUN_CLAUDE_E2E=1` repository variable
+or the manual workflow checkbox because it requires a funded Anthropic account.
 
 ## Fly.io Deployment
 

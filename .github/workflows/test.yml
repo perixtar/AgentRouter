@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_claude_e2e:
+        description: Run Claude Code E2E. Requires a funded Anthropic account.
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -210,7 +216,7 @@ jobs:
     name: Claude Code E2E
     runs-on: ubuntu-latest
     needs: local
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (vars.RUN_CLAUDE_E2E == '1' || inputs.run_claude_e2e)
     services:
       postgres:
         image: postgres:16
