@@ -11,6 +11,36 @@ importers:
 
   .:
     dependencies:
+      '@agentrouter/api':
+        specifier: workspace:*
+        version: link:apps/api
+      '@agentrouter/artifacts-r2':
+        specifier: workspace:*
+        version: link:packages/artifacts/r2
+      '@agentrouter/config':
+        specifier: workspace:*
+        version: link:packages/config
+      '@agentrouter/core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@agentrouter/credential-boundary':
+        specifier: workspace:*
+        version: link:packages/security/credential-boundary
+      '@agentrouter/db':
+        specifier: workspace:*
+        version: link:packages/db
+      '@agentrouter/runtime-claude-code':
+        specifier: workspace:*
+        version: link:packages/runtime/claude-code
+      '@agentrouter/runtime-codex-cli':
+        specifier: workspace:*
+        version: link:packages/runtime/codex-cli
+      '@agentrouter/sandbox-daytona':
+        specifier: workspace:*
+        version: link:packages/sandbox/daytona
+      '@agentrouter/worker':
+        specifier: workspace:*
+        version: link:packages/worker
       '@aws-sdk/client-s3':
         specifier: ^3.927.0
         version: 3.1057.0
@@ -54,12 +84,18 @@ importers:
       '@agentrouter/artifacts-r2':
         specifier: workspace:*
         version: link:../../packages/artifacts/r2
+      '@agentrouter/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@agentrouter/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@agentrouter/db':
         specifier: workspace:*
         version: link:../../packages/db
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
       fastify:
         specifier: ^5.8.5
         version: 5.8.5

@@ -6,9 +6,11 @@
     ".": "./src/server.ts"
   },
   "dependencies": {
+    "@agentrouter/artifacts-r2": "workspace:*",
+    "@agentrouter/config": "workspace:*",
     "@agentrouter/core": "workspace:*",
     "@agentrouter/db": "workspace:*",
-    "@agentrouter/artifacts-r2": "workspace:*",
+    "dotenv": "^17.4.2",
     "fastify": "^5.8.5",
     "pg": "^8.21.0",
     "zod": "^4.4.3"

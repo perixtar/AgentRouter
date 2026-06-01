@@ -34,6 +34,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@agentrouter/api": "workspace:*",
+    "@agentrouter/artifacts-r2": "workspace:*",
+    "@agentrouter/config": "workspace:*",
+    "@agentrouter/core": "workspace:*",
+    "@agentrouter/credential-boundary": "workspace:*",
+    "@agentrouter/db": "workspace:*",
+    "@agentrouter/runtime-claude-code": "workspace:*",
+    "@agentrouter/runtime-codex-cli": "workspace:*",
+    "@agentrouter/sandbox-daytona": "workspace:*",
+    "@agentrouter/worker": "workspace:*",
     "@aws-sdk/client-s3": "^3.927.0",
     "@aws-sdk/s3-request-presigner": "^3.927.0",
     "@daytona/sdk": "^0.183.0",
