@@ -113,23 +113,6 @@ describe("AgentRouter TypeScript SDK", () => {
     await expect(
       runAgent({
         client: sdk,
-        sessionId: run.id,
-        afterSeq: 0,
-        pollIntervalMs: 1,
-        maxWaitMs: 100,
-        onEvent: (event) => events.push(event)
-      })
-    ).resolves.toMatchObject({
-      run: { id: run.id, status: "completed" },
-      text: "SDK final answer",
-      session: {
-        eventCursor: { lastEventSeq: 2 }
-      }
-    });
-
-    await expect(
-      runAgent({
-        client: sdk,
         task: "Summarize again",
         runtime: codex({ mode: "default", model: "gpt-4o" }),
         pollIntervalMs: 1,
@@ -141,6 +124,171 @@ describe("AgentRouter TypeScript SDK", () => {
 
     const cancelling = await sdk.cancelRun(run.id);
     expect(cancelling.status).toBe("completed");
+  });
+
+  it("continueRun resolves the conversation by run id and enqueues a new turn", async () => {
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+
+    // Turn 1: create a run and (simulating the worker grace-park) promote it to
+    // a conversation keyed by its run id.
+    const run = await sdk.createRun({
+      task: "write fib.py",
+      runtime: codex({ mode: "full_access" })
+    });
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.updateRunStatus(run.id, "starting");
+        await repo.updateRunStatus(run.id, "running");
+        await repo.updateRunStatus(run.id, "completed");
+        await repo.promoteRunToSession({
+          sessionId: `sess_${randomUUID()}`,
+          runId: run.id,
+          orgId: "org_system",
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          prompt: "write fib.py",
+          sandboxId: `sandbox_${randomUUID()}`,
+          codexSessionId: "thread_xyz",
+          sandboxState: "suspended",
+          idleDeadlineAt: new Date(Date.now() + 10 * 60_000)
+        });
+      });
+    } finally {
+      client.release();
+    }
+
+    // continueRun by the FIRST run id → a brand-new turn-2 run.
+    const continued = await sdk.continueRun(run.id, "now add a test");
+    expect(continued.turnNumber).toBe(2);
+    expect(continued.conversationId).toBe(run.id); // handle = first run id
+    expect(continued.runId).not.toBe(run.id);
+
+    // getRunTurns lists both turns of the conversation.
+    const turns = await sdk.getRunTurns(run.id);
+    expect(turns.conversationId).toBe(run.id);
+    expect(turns.items.map((t) => t.turnNumber)).toEqual([1, 2]);
+    expect(turns.items.map((t) => t.runId)).toEqual([run.id, continued.runId]);
+
+    // runAgent({ continueRun, message }) actually CONTINUES (sends the message,
+    // then waits the new turn). Simulate the worker finishing turn 3.
+    const completeNextTurn = async (turnRunId: string, text: string) => {
+      const c = await pool.connect();
+      try {
+        await withSearchPath(c, schema, async () => {
+          const repo = new RunRepository(c);
+          await repo.appendEvent({
+            runId: turnRunId,
+            source: "worker",
+            eventType: "agent.response",
+            visibility: "public",
+            payload: { text, parts: [{ type: "text", text }], provider: "codex" }
+          });
+          await repo.appendEvent({
+            runId: turnRunId,
+            source: "worker",
+            eventType: "run.completed",
+            visibility: "public",
+            payload: { message: "done" }
+          });
+          await repo.updateRunStatus(turnRunId, "starting");
+          await repo.updateRunStatus(turnRunId, "running");
+          await repo.updateRunStatus(turnRunId, "completed");
+        });
+      } finally {
+        c.release();
+      }
+    };
+
+    // Mark turn 2 complete so the conversation is idle again, then runAgent-continue.
+    await completeNextTurn(continued.runId, "added test_fib.py");
+
+    // Fire runAgent (which enqueues turn 3), grab its run id, complete it, await.
+    let turn3RunId = "";
+    const resumePromise = runAgent({
+      client: sdk,
+      continueRun: run.id,
+      message: "now add a docstring",
+      pollIntervalMs: 5,
+      maxWaitMs: 5_000
+    });
+    // Poll for turn 3's run id, then simulate the worker completing it.
+    for (let i = 0; i < 100 && !turn3RunId; i++) {
+      const t = await sdk.getRunTurns(run.id);
+      const turn3 = t.items.find((x) => x.turnNumber === 3);
+      if (turn3) turn3RunId = turn3.runId;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(turn3RunId).not.toBe("");
+    await completeNextTurn(turn3RunId, "added docstring");
+
+    const result = await resumePromise;
+    expect(result.run.id).toBe(turn3RunId); // resumed the NEW turn, not the old run
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("added docstring");
+  });
+
+  it("sends the X-AR-Org-Id header when constructed with orgId", async () => {
+    const seen: Array<Record<string, string>> = [];
+    const recordingFetch: typeof fetch = async (input, init) => {
+      seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+      return fetch(input as RequestInfo, init);
+    };
+    const sdk = agentrouter({
+      baseUrl,
+      apiKey: config.apiKey,
+      orgId: "org_system",
+      fetchImpl: recordingFetch
+    });
+    await sdk.listRuns({ limit: 1 });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[0]?.["x-ar-org-id"]).toBe("org_system");
+  });
+
+  it("closeRun closes a conversation by run id", async () => {
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+    const run = await sdk.createRun({
+      task: "write thing.py",
+      runtime: codex({ mode: "full_access" })
+    });
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.updateRunStatus(run.id, "starting");
+        await repo.updateRunStatus(run.id, "running");
+        await repo.updateRunStatus(run.id, "completed");
+        await repo.promoteRunToSession({
+          sessionId: `sess_${randomUUID()}`,
+          runId: run.id,
+          orgId: "org_system",
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          prompt: "write thing.py",
+          sandboxId: `sandbox_${randomUUID()}`,
+          sandboxState: "suspended",
+          idleDeadlineAt: new Date(Date.now() + 10 * 60_000)
+        });
+      });
+    } finally {
+      client.release();
+    }
+
+    const closed = await sdk.closeRun(run.id);
+    expect(closed).toMatchObject({ closed: true, conversationId: run.id, reclaimed: true });
+  });
+
+  it("rejects continuing a non-promoted run with run_not_continuable", async () => {
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+    const run = await sdk.createRun({
+      task: "one-shot only",
+      runtime: codex({ mode: "full_access" })
+    });
+    await expect(sdk.continueRun(run.id, "continue please")).rejects.toMatchObject({
+      code: "run_not_continuable",
+      statusCode: 409
+    });
   });
 
   it("streams events from streamAgent until the run is terminal", async () => {
@@ -261,5 +409,17 @@ describe("AgentRouter TypeScript SDK", () => {
     const sdkModule = await import("@agentrouter/sdk");
 
     expect(sdkModule).not.toHaveProperty("resumeRun");
+  });
+
+  it("exposes run-id multi-turn helpers (continueRun/getRunTurns/closeRun/continueAgent)", async () => {
+    const sdkModule = await import("@agentrouter/sdk");
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+
+    // Client methods exist.
+    expect(typeof sdk.continueRun).toBe("function");
+    expect(typeof sdk.getRunTurns).toBe("function");
+    expect(typeof sdk.closeRun).toBe("function");
+    // Top-level streaming helper exists.
+    expect(typeof sdkModule.continueAgent).toBe("function");
   });
 });

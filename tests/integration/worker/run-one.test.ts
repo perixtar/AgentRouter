@@ -148,6 +148,73 @@ describe("worker run-one orchestration", () => {
     }
   }, 60_000);
 
+  it("completes a legacy/system org Codex run on the global key without a uuid BYOK lookup", async () => {
+    // Regression: the legacy admin path (raw AGENTROUTER_API_KEY, no X-AR-Org-Id)
+    // resolves to the "org_system" sentinel. That is NOT a uuid, so it must not
+    // hit the provider_keys (org_id uuid) BYOK lookup — which would raise
+    // `invalid input syntax for type uuid: "org_system"` and fail the run — and
+    // must stay ephemeral (delete-on-finish, global key), exactly as pre-BYOK.
+    const systemRunId = `run_${randomUUID()}`;
+    const systemSandbox = new RecordingSandboxDriver();
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        const repo = new RunRepository(setupClient);
+        await repo.createRun({
+          id: systemRunId,
+          orgId: "org_system",
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          runtimeModel: "gpt-4o",
+          input: {
+            task: "Create reports/system-smoke.txt and summarize the change",
+            runtime: { kind: "codex", mode: "full_access", model: "gpt-4o" }
+          },
+          promptSummary: "Create reports/system-smoke.txt and summarize the change"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const result = await runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: systemSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env
+    });
+
+    expect(result).toEqual({ processed: true, runId: systemRunId });
+    // full_access would be grace-eligible for a REAL org; a system org must NOT
+    // be parked as a session — the one-shot sandbox is deleted on finish.
+    expect(systemSandbox.deletedSandboxIds).toEqual(["sandbox_1"]);
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const run = await repo.getRunInternal(systemRunId);
+        const events = await repo.listEventsInternal({ runId: systemRunId });
+
+        expect(run?.status).toBe("completed");
+        // No uuid error surfaced as a failure reason.
+        expect(run?.failureReason ?? "").not.toContain("uuid");
+        expect(events.at(-1)?.eventType).toBe("run.completed");
+        // Stayed ephemeral: never promoted to a resumable session.
+        const session = await repo.findSessionByRunId(systemRunId, "org_system");
+        expect(session).toBeUndefined();
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(systemRunId);
+    }
+  }, 60_000);
+
   it("records normalized progress events while provider stdout is streaming", async () => {
     const streamingRunId = `run_${randomUUID()}`;
     const streamingSandbox = new StreamingRecordingSandboxDriver({

@@ -49,7 +49,8 @@ export function PlaygroundClient() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [byok, setByok] = useState<{ connected: boolean; last4?: string } | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  // The conversation handle = the FIRST run's id. Follow-ups continue by it.
+  const [conversationId, setConversationId] = useState<string | null>(null);
 
   const termRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -91,11 +92,13 @@ export function PlaygroundClient() {
   }, [status]);
 
   // Resume an in-flight or finished run from a shareable ?run=<id> link.
-  // Polls from sequence 0 so the Terminal/Files rebuild from the event log.
+  // The link's run id is treated as the conversation handle so follow-ups in
+  // the chat continue it. Polls from sequence 0 to rebuild Terminal/Files.
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("run");
     if (!id) return;
     setRunId(id);
+    setConversationId(id);
     setStatus("queued");
     setTermLines([{ key: "resume-0", cls: "dim", text: `· resuming ${id}` }]);
     poll(id, 0);
@@ -202,7 +205,7 @@ export function PlaygroundClient() {
     const value = (taRef.current?.value ?? task).trim();
     if (!value || running || submitting) return;
 
-    const isFollowUp = sessionId !== null;
+    const isFollowUp = conversationId !== null;
     setSubmitting(true);
     setError(null);
     setMessages((prev) => [...prev, { role: "user", text: value }]);
@@ -224,12 +227,12 @@ export function PlaygroundClient() {
     }
 
     try {
-      const { url, body } = isFollowUp
-        ? {
-            url: `/api/playground/session/${sessionId}/message`,
-            body: { message: value }
-          }
-        : { url: "/api/playground/session", body: { message: value } };
+      // Turn 1 creates a run (its id becomes the conversation handle);
+      // follow-ups continue by that run id (run-id multi-turn).
+      const url = isFollowUp
+        ? `/api/playground/run/${conversationId}/message`
+        : "/api/playground/run";
+      const body = isFollowUp ? { message: value } : { task: value };
 
       const res = await fetch(url, {
         method: "POST",
@@ -237,8 +240,8 @@ export function PlaygroundClient() {
         body: JSON.stringify(body)
       });
       const data = (await res.json()) as {
-        sessionId?: string;
         runId?: string;
+        conversationId?: string;
         error?: string;
         message?: string;
       };
@@ -247,14 +250,15 @@ export function PlaygroundClient() {
         setStatus("failed");
         return;
       }
-      if (data.sessionId) setSessionId(data.sessionId);
+      // The first run's id is the conversation handle for all later turns.
+      if (!isFollowUp) setConversationId(data.runId);
       setRunId(data.runId);
       setTermLines((prev) => [
         ...prev,
         {
           key: `init-${data.runId}`,
           cls: "ok",
-          text: `✓ ${data.runId} queued${isFollowUp ? " (resume)" : ""}`
+          text: `✓ ${data.runId} queued${isFollowUp ? " (continue)" : ""}`
         }
       ]);
       poll(data.runId, 0);

@@ -21,10 +21,10 @@ Create a run and print the final agent response:
 pnpm example:run-agent
 ```
 
-Resume an existing run/session:
+Continue an existing conversation (turn 2+) by its run id:
 
 ```sh
-AGENTROUTER_SESSION_ID=run_... AGENTROUTER_AFTER_SEQ=0 pnpm example:run-agent
+AGENTROUTER_CONTINUE_RUN=run_... AGENTROUTER_MESSAGE="add a test" pnpm example:run-agent
 ```
 
 ## streamAgent

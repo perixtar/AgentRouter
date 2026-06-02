@@ -419,16 +419,32 @@ async function executeOneShotRun(
   }
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A "real" tenant org is a present, valid-UUID org id — i.e. a row that exists
+ * in `orgs(id uuid)` and can be used to key the `provider_keys.org_id` (uuid)
+ * lookup. The legacy/admin path authenticates with the raw AGENTROUTER_API_KEY
+ * and gets the `"org_system"` sentinel (not a uuid); a missing/null org is the
+ * other non-real case. Non-real orgs must NOT touch the uuid BYOK lookup and
+ * must NOT enter the BYOK/grace lifecycle — they stay ephemeral on the global
+ * key, exactly as pre-BYOK.
+ */
+function isRealOrg(orgId: string | null | undefined): orgId is string {
+  return typeof orgId === "string" && UUID_RE.test(orgId);
+}
+
 /**
  * Grace applies only to runs that can actually be continued AND belong to a
- * tenant: Codex in an exec-mode (default/read_only/full_access) with an org.
- * auto_review runs `codex review` (terminal) and claude_code isn't
- * session-capable; legacy global-key runs (no org) keep the ephemeral
- * delete-on-finish lifecycle.
+ * real tenant: Codex in an exec-mode (default/read_only/full_access) with a
+ * real (uuid) org. auto_review runs `codex review` (terminal) and claude_code
+ * isn't session-capable; legacy/system global-key runs (no org or the
+ * "org_system" sentinel) keep the ephemeral delete-on-finish lifecycle.
  */
 function isGraceEligibleRun(run: RunRecord): boolean {
   return (
-    Boolean(run.orgId) &&
+    isRealOrg(run.orgId) &&
     isCodexRunRecord(run) &&
     ["default", "read_only", "full_access"].includes(run.runtimeMode)
   );
@@ -1409,15 +1425,18 @@ async function markRunFailed(
 
 /**
  * Resolves the raw provider key for a run.
- * - org run (org_id set): decrypt the org's provider_keys row → that key only.
- *   No key → RunFailure("byok_missing").
- * - legacy run (org_id null): undefined → buildRuntimeLaunch uses the global key.
+ * - real org run (org_id is a uuid): decrypt the org's provider_keys row → that
+ *   key only. No key → RunFailure("byok_missing").
+ * - legacy/system run (org_id null or the "org_system" sentinel, i.e. not a
+ *   uuid): undefined → buildRuntimeLaunch uses the global key. Crucially we must
+ *   NOT query provider_keys (org_id is a uuid column) with a non-uuid principal,
+ *   or Postgres raises `invalid input syntax for type uuid` and the run fails.
  */
 async function resolveOrgProviderKey(
   input: RunOneWorkerIterationInput,
   run: RunRecord
 ): Promise<string | undefined> {
-  if (!run.orgId) return undefined;
+  if (!isRealOrg(run.orgId)) return undefined;
 
   // BYOK currently covers OpenAI/Codex. Claude Code BYOK is a later phase; for
   // now only resolve for codex runs (claude_code org runs fall through to the

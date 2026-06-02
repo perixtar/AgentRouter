@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 
-import { AgentRouterApiError, createRun } from "@/lib/agentrouter";
 import { requirePrincipal } from "@/lib/auth";
+import { AgentRouterError, sdkFor } from "@/lib/sdk";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Turn 1 of a conversation: createRun via the real SDK. The returned run id is
+ * the conversation handle — follow-ups continue by that id.
+ */
 export async function POST(request: Request) {
   const principal = await requirePrincipal();
   if (!principal) {
@@ -26,16 +30,16 @@ export async function POST(request: Request) {
   try {
     // full_access: live file-creating runs hit nested-sandbox limits with codex
     // workspace-write inside Daytona; full_access is the working live path.
-    const run = await createRun(principal.orgId, {
+    const run = await sdkFor(principal.orgId).createRun({
       task,
       runtime: { kind: "codex", mode: "full_access" }
     });
     return NextResponse.json({ runId: run.id, status: run.status }, { status: 201 });
   } catch (error) {
-    if (error instanceof AgentRouterApiError) {
+    if (error instanceof AgentRouterError) {
       return NextResponse.json(
         { error: error.code, message: error.message },
-        { status: error.status }
+        { status: error.statusCode ?? 502 }
       );
     }
     return NextResponse.json({ error: "upstream_unavailable" }, { status: 502 });

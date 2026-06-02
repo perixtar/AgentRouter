@@ -12,30 +12,34 @@ if (hasHelpFlag()) {
   process.exit(0);
 }
 
-const sessionId = process.env.AGENTROUTER_SESSION_ID;
+// Continue an existing conversation by run id (the run id is the handle).
+const continueRun = process.env.AGENTROUTER_CONTINUE_RUN;
+const continueMessage = process.env.AGENTROUTER_MESSAGE;
 const afterSeq = Number(process.env.AGENTROUTER_AFTER_SEQ ?? "0");
 
 try {
   const { baseUrl, client } = makeExampleClient();
-  const result = sessionId
-    ? await runAgent({
-        client,
-        sessionId,
-        afterSeq,
-        pollIntervalMs: 1000,
-        maxWaitMs: 10 * 60 * 1000,
-        onEvent: logRunEvent,
-      })
-    : await runAgent({
-        client,
-        task:
-          process.env.AGENTROUTER_TASK ??
-          "Please explain to me what is forward deployment engineer. Do not edit files.",
-        runtime: codexRuntime("default"),
-        pollIntervalMs: 1000,
-        maxWaitMs: 10 * 60 * 1000,
-        onEvent: logRunEvent,
-      });
+  const result =
+    continueRun && continueMessage
+      ? await runAgent({
+          client,
+          continueRun,
+          message: continueMessage,
+          afterSeq,
+          pollIntervalMs: 1000,
+          maxWaitMs: 10 * 60 * 1000,
+          onEvent: logRunEvent,
+        })
+      : await runAgent({
+          client,
+          task:
+            process.env.AGENTROUTER_TASK ??
+            "Please explain to me what is forward deployment engineer. Do not edit files.",
+          runtime: codexRuntime("default"),
+          pollIntervalMs: 1000,
+          maxWaitMs: 10 * 60 * 1000,
+          onEvent: logRunEvent,
+        });
 
   console.log(`API: ${baseUrl}`);
   console.log(`Run ${result.id}: ${result.status}`);
@@ -49,8 +53,9 @@ try {
 function printHelp(): void {
   console.log(`runAgent example
 
-Creates a Codex run and prints result.text. To resume an existing run instead
-of creating a new one, set AGENTROUTER_SESSION_ID.
+Creates a Codex run and prints result.text. To continue an existing
+conversation (turn 2+) by its run id instead of creating a new one, set
+AGENTROUTER_CONTINUE_RUN and AGENTROUTER_MESSAGE.
 
 Prerequisites:
   pnpm dev
@@ -62,8 +67,8 @@ Or run the processes separately:
 Run:
   pnpm example:run-agent
 
-Resume:
-  AGENTROUTER_SESSION_ID=run_... AGENTROUTER_AFTER_SEQ=0 pnpm example:run-agent
+Continue (turn 2+):
+  AGENTROUTER_CONTINUE_RUN=run_... AGENTROUTER_MESSAGE="add a test" pnpm example:run-agent
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787

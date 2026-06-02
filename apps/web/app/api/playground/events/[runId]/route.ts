@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { AgentRouterApiError, getRun, listEvents } from "@/lib/agentrouter";
 import { requirePrincipal } from "@/lib/auth";
+import { AgentRouterError, sdkFor } from "@/lib/sdk";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +17,13 @@ export async function GET(
   const { runId } = await params;
   const url = new URL(request.url);
   const afterSeq = Number(url.searchParams.get("afterSeq") ?? "0") || 0;
+  const sdk = sdkFor(principal.orgId);
 
   try {
     // Run status + new events since afterSeq, both org-scoped by the API.
     const [run, events] = await Promise.all([
-      getRun(principal.orgId, runId),
-      listEvents(principal.orgId, runId, afterSeq)
+      sdk.getRun(runId),
+      sdk.listRunEvents(runId, { afterSeq, limit: 500 })
     ]);
 
     // Only forward client-visible streams to the Terminal / chat.
@@ -43,11 +44,11 @@ export async function GET(
       nextAfterSeq: events.nextAfterSeq
     });
   } catch (error) {
-    if (error instanceof AgentRouterApiError) {
+    if (error instanceof AgentRouterError) {
       // 404 → run not found / not this org's. Surface as-is.
       return NextResponse.json(
         { error: error.code, message: error.message },
-        { status: error.status }
+        { status: error.statusCode ?? 502 }
       );
     }
     return NextResponse.json({ error: "upstream_unavailable" }, { status: 502 });

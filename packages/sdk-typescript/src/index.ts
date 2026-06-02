@@ -1,6 +1,15 @@
 export interface AgentRouterOptions {
   baseUrl?: string;
   apiKey: string;
+  /**
+   * Org to act as. When set, every request sends `X-AR-Org-Id: <orgId>`. This is
+   * the web/server path: pair it with the shared `AGENTROUTER_WEB_SERVICE_TOKEN`
+   * as `apiKey` so the API trusts the asserted org. External SDK customers using
+   * an `ar_live_…` key leave this unset (the key already resolves their org).
+   */
+  orgId?: string;
+  /** Extra headers sent on every request (merged before per-call headers). */
+  defaultHeaders?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
@@ -45,6 +54,10 @@ export interface Run {
   task: string;
   input: Record<string, unknown>;
   lastEventSeq: number;
+  /** Conversation this run belongs to (the first run's id). The run id is the handle. */
+  conversationId?: string;
+  /** Internal session id once the run has been continued; null for an uncontinued one-shot. */
+  sessionId?: string | null;
   queuedAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -174,6 +187,35 @@ export interface SessionEventsResult {
   nextAfterSeq: number;
 }
 
+// ── Run-id multi-turn (M1 API): the run id is the conversation handle. ──
+
+export interface ContinueRunResult {
+  /** The new turn's run id (stream this to follow the turn). */
+  runId: string;
+  turnNumber: number;
+  /** The conversation handle (the first run's id). */
+  conversationId: string;
+}
+
+export interface RunTurn {
+  id: string;
+  runId: string;
+  turnNumber: number;
+  prompt: string;
+  createdAt: string;
+}
+
+export interface RunTurnsResult {
+  conversationId: string;
+  items: RunTurn[];
+}
+
+export interface CloseRunResult {
+  closed: boolean;
+  conversationId: string;
+  reclaimed: boolean;
+}
+
 export interface AgentRouterClient {
   createRun(input: CreateRunRequest): Promise<Run>;
   listRuns(query?: { status?: string; limit?: number }): Promise<{ items: Run[] }>;
@@ -188,6 +230,10 @@ export interface AgentRouterClient {
   downloadArtifact(runId: string, artifactId: string): Promise<ArrayBuffer>;
   streamRun(runId: string, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
   createRunAndWait(input: CreateAndWaitRequest): Promise<RunSession>;
+  // ── run-id multi-turn (M1): continue / inspect / close a conversation by run id ──
+  continueRun(runId: string, message: string): Promise<ContinueRunResult>;
+  getRunTurns(runId: string): Promise<RunTurnsResult>;
+  closeRun(runId: string): Promise<CloseRunResult>;
   // ── sessions (M4) ──
   createSession(input?: CreateSessionRequest): Promise<Session>;
   getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }>;
@@ -202,12 +248,20 @@ export interface AgentRouterClient {
 
 export interface RunAgentCreateRequest extends CreateAndWaitRequest {
   client: AgentRouterClient;
-  sessionId?: never;
+  continueRun?: never;
+  message?: never;
 }
 
+/**
+ * Continue an existing conversation by run id and wait for the new turn to
+ * finish. Pass the handle (the first run's) id as `continueRun` plus the
+ * follow-up `message`. (Previously this took a `sessionId` that was actually a
+ * runId and never sent a message — that broken shape has been removed.)
+ */
 export interface RunAgentResumeRequest {
   client: AgentRouterClient;
-  sessionId: string;
+  continueRun: string;
+  message: string;
   afterSeq?: number;
   pollIntervalMs?: number;
   maxWaitMs?: number;
@@ -222,8 +276,20 @@ export interface StreamAgentRequest extends CreateRunRequest {
   maxWaitMs?: number;
 }
 
+export interface ContinueAgentRequest {
+  client: AgentRouterClient;
+  /** The conversation handle (the first run's id). */
+  runId: string;
+  message: string;
+  pollIntervalMs?: number;
+  maxWaitMs?: number;
+}
+
 export interface AgentRunStream {
   run: Run;
+  /** The new turn's run id (for continueAgent: the turn just enqueued). */
+  conversationId: string;
+  turnNumber?: number;
   events: AsyncGenerator<RunEvent>;
   fullStream: AsyncGenerator<AgentStreamPart>;
   textStream: AsyncGenerator<string>;
@@ -244,8 +310,11 @@ export function claudeCode(options: ClaudeCodeRuntimeOptions = {}): ClaudeCodeRu
 
 export async function runAgent(input: RunAgentRequest): Promise<AgentRunResult> {
   if (isRunAgentResumeRequest(input)) {
-    const { client, sessionId, afterSeq, pollIntervalMs, maxWaitMs, onEvent } = input;
-    const session = await waitForRunSession(client, sessionId, {
+    const { client, continueRun, message, afterSeq, pollIntervalMs, maxWaitMs, onEvent } = input;
+    // Actually continue the conversation: send the follow-up, then wait for the
+    // NEW turn's run to finish (not just re-wait on the old run).
+    const { runId } = await client.continueRun(continueRun, message);
+    const session = await waitForRun(client, runId, {
       afterSeq,
       pollIntervalMs,
       maxWaitMs,
@@ -260,11 +329,19 @@ export async function runAgent(input: RunAgentRequest): Promise<AgentRunResult> 
     return toAgentRunResult(session);
   }
 
-  throw new AgentRouterError("invalid_run_agent_request", "runAgent requires either task or sessionId");
+  throw new AgentRouterError(
+    "invalid_run_agent_request",
+    "runAgent requires either { task } to start or { continueRun, message } to continue"
+  );
 }
 
 function isRunAgentResumeRequest(input: RunAgentRequest): input is RunAgentResumeRequest {
-  return "sessionId" in input && typeof input.sessionId === "string" && input.sessionId.length > 0;
+  return (
+    "continueRun" in input &&
+    typeof input.continueRun === "string" &&
+    input.continueRun.length > 0 &&
+    typeof input.message === "string"
+  );
 }
 
 function isRunAgentCreateRequest(input: RunAgentRequest): input is RunAgentCreateRequest {
@@ -276,12 +353,33 @@ export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunSt
   const run = await client.createRun(request);
   return {
     run,
+    conversationId: run.conversationId ?? run.id,
     events: streamRunEventsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
     fullStream: streamRunPartsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
     textStream: streamRunTextUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
-    finalResult: waitForRunSession(client, run.id, { pollIntervalMs, maxWaitMs }).then(
+    finalResult: waitForRun(client, run.id, { pollIntervalMs, maxWaitMs }).then(
       toAgentRunResult
     )
+  };
+}
+
+/**
+ * Continue a conversation by run id and stream the new turn's events/text.
+ * Mirrors `streamAgent` but for turn 2+: sends the follow-up message, then
+ * streams the freshly-enqueued turn's run. `run` here is the turn's run.
+ */
+export async function continueAgent(input: ContinueAgentRequest): Promise<AgentRunStream> {
+  const { client, runId, message, pollIntervalMs, maxWaitMs } = input;
+  const { runId: turnRunId, turnNumber, conversationId } = await client.continueRun(runId, message);
+  const run = await client.getRun(turnRunId);
+  return {
+    run,
+    conversationId,
+    turnNumber,
+    events: streamRunEventsUntilTerminal(client, turnRunId, { pollIntervalMs, maxWaitMs }),
+    fullStream: streamRunPartsUntilTerminal(client, turnRunId, { pollIntervalMs, maxWaitMs }),
+    textStream: streamRunTextUntilTerminal(client, turnRunId, { pollIntervalMs, maxWaitMs }),
+    finalResult: waitForRun(client, turnRunId, { pollIntervalMs, maxWaitMs }).then(toAgentRunResult)
   };
 }
 
@@ -335,6 +433,37 @@ class AgentRouterClientImpl implements AgentRouterClient {
     return this.http.createAndWait(input);
   }
 
+  // ── run-id multi-turn (M1) ──
+  async continueRun(runId: string, message: string): Promise<ContinueRunResult> {
+    // A run becomes continuable the instant its grace-park (suspend + promote
+    // to a conversation) settles — which lands just after the run reports
+    // `completed`. Continuing immediately can race that window and get a
+    // transient `run_not_continuable`. Retry briefly (only that code, only
+    // while the run is terminal) so the common "continue right after a turn"
+    // flow is reliable, without masking a genuinely non-continuable run.
+    const deadline = Date.now() + 8000;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.http.continueRun(runId, message);
+      } catch (error) {
+        const retriable =
+          error instanceof AgentRouterError &&
+          error.code === "run_not_continuable" &&
+          Date.now() < deadline;
+        if (!retriable) throw error;
+        await sleep(Math.min(250 * (attempt + 1), 1000));
+      }
+    }
+  }
+
+  async getRunTurns(runId: string): Promise<RunTurnsResult> {
+    return this.http.getRunTurns(runId);
+  }
+
+  async closeRun(runId: string): Promise<CloseRunResult> {
+    return this.http.closeRun(runId);
+  }
+
   // ── sessions (M4) ──
   async createSession(input: CreateSessionRequest = {}): Promise<Session> {
     return this.http.createSession(input);
@@ -368,11 +497,16 @@ class AgentRouterHttpClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly baseHeaders: Record<string, string>;
 
   constructor(options: AgentRouterOptions) {
     this.baseUrl = (options.baseUrl ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.baseHeaders = {
+      ...(options.defaultHeaders ?? {}),
+      ...(options.orgId ? { "x-ar-org-id": options.orgId } : {})
+    };
   }
 
   async create(input: CreateRunRequest): Promise<Run> {
@@ -415,6 +549,25 @@ class AgentRouterHttpClient {
 
   async cancel(runId: string): Promise<Run> {
     return this.request<Run>(`/v1/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: "POST",
+      body: {}
+    });
+  }
+
+  // ── run-id multi-turn (M1) ──
+  async continueRun(runId: string, message: string): Promise<ContinueRunResult> {
+    return this.request<ContinueRunResult>(`/v1/runs/${encodeURIComponent(runId)}/messages`, {
+      method: "POST",
+      body: { message }
+    });
+  }
+
+  async getRunTurns(runId: string): Promise<RunTurnsResult> {
+    return this.request<RunTurnsResult>(`/v1/runs/${encodeURIComponent(runId)}/turns`);
+  }
+
+  async closeRun(runId: string): Promise<CloseRunResult> {
+    return this.request<CloseRunResult>(`/v1/runs/${encodeURIComponent(runId)}/close`, {
       method: "POST",
       body: {}
     });
@@ -544,6 +697,7 @@ class AgentRouterHttpClient {
       method: options.method ?? "GET",
       headers: {
         authorization: `Bearer ${this.apiKey}`,
+        ...this.baseHeaders,
         ...(options.body !== undefined ? { "content-type": "application/json" } : {}),
         ...options.headers
       },
@@ -576,7 +730,13 @@ export class AgentRouterError extends Error {
   }
 }
 
-async function waitForRunSession(
+/**
+ * Polls a run by its id until it reaches a terminal state, then returns its
+ * RunSession snapshot. (Honest name: the parameter is a runId — it does NOT
+ * send any message. To continue a conversation, call `client.continueRun` /
+ * `runAgent({ continueRun, message })`.)
+ */
+async function waitForRun(
   client: AgentRouterClient,
   runId: string,
   options: {

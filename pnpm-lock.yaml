@@ -108,6 +108,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@agentrouter/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk-typescript
       '@supabase/ssr':
         specifier: ^0.7.0
         version: 0.7.0(@supabase/supabase-js@2.106.2)

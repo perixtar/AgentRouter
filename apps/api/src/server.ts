@@ -606,7 +606,24 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
     return { provider, connected: false };
   });
 
-  // ── Multi-turn sessions (M4) — Codex-only, org-scoped. ──
+  // ── Multi-turn sessions (M4) — DEPRECATED, Codex-only, org-scoped. ──
+  //
+  // DEPRECATED: the conversation surface is now keyed off the run id
+  // (`POST /v1/runs`, `POST /v1/runs/:id/messages`, `GET /v1/runs/:id/turns`,
+  // `POST /v1/runs/:id/close`). These `/v1/sessions*` routes remain mounted and
+  // fully functional for backward compatibility (the web no longer calls them);
+  // they are slated for removal in a later milestone. New callers MUST use the
+  // run-id surface. Every `/v1/sessions*` response carries a `Deprecation` header.
+  server.addHook("onSend", async (request, reply, payload) => {
+    if (request.url.startsWith("/v1/sessions")) {
+      reply.header("Deprecation", "true");
+      reply.header(
+        "Link",
+        '</v1/runs/:id/messages>; rel="successor-version"; title="run-id multi-turn"'
+      );
+    }
+    return payload;
+  });
 
   server.post("/v1/sessions", async (request, reply) => {
     const orgId = orgOf(request);
