@@ -21,6 +21,15 @@ export interface AgentRouterConfig {
   heartbeatIntervalSeconds: number;
   staleHeartbeatGraceSeconds: number;
   daytonaSandboxTtlSeconds: number;
+  /** Minutes a finished one-shot sandbox stays suspended so a fast follow-up can resume it. */
+  oneShotGraceMinutes: number;
+  /** Minutes a continued conversation may sit idle (suspended) before the reaper deletes it. */
+  sessionIdleTtlMinutes: number;
+  /** Daytona-side auto-delete backstop (minutes) for persistent sandboxes. */
+  sessionAutoStopMinutes: number;
+  sessionAutoDeleteMinutes: number;
+  /** How often the worker reaper sweeps for expired sandboxes (seconds). */
+  reaperIntervalSeconds: number;
 }
 
 const envSchema = z.object({
@@ -48,7 +57,13 @@ const envSchema = z.object({
   AGENTROUTER_TEST_RESOURCE_PREFIX: z.string().min(1),
   AGENTROUTER_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().positive(),
   AGENTROUTER_STALE_HEARTBEAT_GRACE_SECONDS: z.coerce.number().int().positive(),
-  DAYTONA_SANDBOX_TTL_SECONDS: z.coerce.number().int().positive()
+  DAYTONA_SANDBOX_TTL_SECONDS: z.coerce.number().int().positive(),
+  // ── Multi-turn run lifecycle / sandbox reclaim (env-tunable defaults). ──
+  AGENTROUTER_ONESHOT_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
+  AGENTROUTER_SESSION_IDLE_TTL_MINUTES: z.coerce.number().int().positive().default(30),
+  AGENTROUTER_SESSION_AUTOSTOP_MINUTES: z.coerce.number().int().positive().default(15),
+  AGENTROUTER_SESSION_AUTODELETE_MINUTES: z.coerce.number().int().positive().default(90),
+  AGENTROUTER_REAPER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60)
 });
 
 export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig {
@@ -76,7 +91,12 @@ export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig
     testResourcePrefix: parsed.AGENTROUTER_TEST_RESOURCE_PREFIX,
     heartbeatIntervalSeconds: parsed.AGENTROUTER_HEARTBEAT_INTERVAL_SECONDS,
     staleHeartbeatGraceSeconds: parsed.AGENTROUTER_STALE_HEARTBEAT_GRACE_SECONDS,
-    daytonaSandboxTtlSeconds: parsed.DAYTONA_SANDBOX_TTL_SECONDS
+    daytonaSandboxTtlSeconds: parsed.DAYTONA_SANDBOX_TTL_SECONDS,
+    oneShotGraceMinutes: parsed.AGENTROUTER_ONESHOT_GRACE_MINUTES,
+    sessionIdleTtlMinutes: parsed.AGENTROUTER_SESSION_IDLE_TTL_MINUTES,
+    sessionAutoStopMinutes: parsed.AGENTROUTER_SESSION_AUTOSTOP_MINUTES,
+    sessionAutoDeleteMinutes: parsed.AGENTROUTER_SESSION_AUTODELETE_MINUTES,
+    reaperIntervalSeconds: parsed.AGENTROUTER_REAPER_INTERVAL_SECONDS
   };
 }
 

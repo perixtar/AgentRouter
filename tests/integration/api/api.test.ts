@@ -544,6 +544,255 @@ describe("AgentRouter API", () => {
     });
     expect(response.statusCode).toBe(400);
   });
+
+  // ── M1: run-id multi-turn ──
+
+  // Simulates what the worker does at grace-park time: promote a finished
+  // one-shot run into a resumable conversation keyed by its run id.
+  async function seedConversation(): Promise<{ runId: string; orgId: string }> {
+    const orgId = "org_system"; // the legacy apiKey principal's org
+    const runId = `run_${randomUUID()}`;
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.createRun({
+          id: runId,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          input: { task: "write fib.py" },
+          promptSummary: "write fib.py"
+        });
+        await repo.updateRunStatus(runId, "starting");
+        await repo.updateRunStatus(runId, "running");
+        await repo.updateRunStatus(runId, "completed");
+        await repo.promoteRunToSession({
+          sessionId: `sess_${randomUUID()}`,
+          runId,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          prompt: "write fib.py",
+          sandboxId: `sandbox_${randomUUID()}`,
+          codexSessionId: "thread_abc",
+          sandboxState: "suspended",
+          idleDeadlineAt: new Date(Date.now() + 10 * 60_000)
+        });
+      });
+    } finally {
+      client.release();
+    }
+    return { runId, orgId };
+  }
+
+  it("M1: continue by run id resolves to the conversation and enqueues turn 2", async () => {
+    const { runId } = await seedConversation();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/messages`,
+      headers: authHeaders(config.apiKey),
+      payload: { message: "now add a test" }
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json();
+    expect(body.turnNumber).toBe(2);
+    expect(body.conversationId).toBe(runId);
+    expect(typeof body.runId).toBe("string");
+    expect(body.runId).not.toBe(runId); // turn 2 is its own run
+
+    // /turns lists both turns of the conversation, handle = first run id.
+    const turns = await server.inject({
+      method: "GET",
+      url: `/v1/runs/${runId}/turns`,
+      headers: authHeaders(config.apiKey)
+    });
+    expect(turns.statusCode).toBe(200);
+    expect(turns.json().conversationId).toBe(runId);
+    expect(turns.json().items.map((t: { turnNumber: number }) => t.turnNumber)).toEqual([1, 2]);
+  });
+
+  it("M1: a second in-flight message returns 409 (per-conversation concurrency)", async () => {
+    const { runId } = await seedConversation();
+
+    const first = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/messages`,
+      headers: authHeaders(config.apiKey),
+      payload: { message: "turn 2" }
+    });
+    expect(first.statusCode).toBe(202);
+
+    // turn 2's run is queued (in-flight) → a second message must be rejected.
+    const second = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/messages`,
+      headers: authHeaders(config.apiKey),
+      payload: { message: "turn 3 too soon" }
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toMatchObject({ error: { code: "run_busy" } });
+  });
+
+  it("M1: continuing a non-promoted run returns 409 run_not_continuable", async () => {
+    // A plain completed run that was never promoted (e.g. grace lapsed / not eligible).
+    const orgId = "org_system";
+    const runId = `run_${randomUUID()}`;
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.createRun({
+          id: runId,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          input: { task: "one-shot only" },
+          promptSummary: "one-shot only"
+        });
+      });
+    } finally {
+      client.release();
+    }
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/messages`,
+      headers: authHeaders(config.apiKey),
+      payload: { message: "continue please" }
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: { code: "run_not_continuable" } });
+  });
+
+  it("M1: continuing a missing run returns 404", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/runs/run_does_not_exist/messages",
+      headers: authHeaders(config.apiKey),
+      payload: { message: "hello" }
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: { code: "run_not_found" } });
+  });
+
+  it("M1: close by run id arms immediate reclaim and closes the conversation", async () => {
+    const { runId } = await seedConversation();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/close`,
+      headers: { ...authHeaders(config.apiKey), "content-type": "application/json" }
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ closed: true, reclaimed: true });
+
+    // The session is closed and its idle deadline armed in the past.
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const session = await repo.findSessionByRunId(runId, "org_system");
+        expect(session?.status).toBe("closed");
+        expect(session?.idleDeadlineAt?.getTime()).toBeLessThan(Date.now());
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  it("M1: runToApi exposes additive sessionId/conversationId", async () => {
+    const { runId } = await seedConversation();
+    const res = await server.inject({
+      method: "GET",
+      url: `/v1/runs/${runId}`,
+      headers: authHeaders(config.apiKey)
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.conversationId).toBe(runId); // handle = first run id
+    expect(body.sessionId).toMatch(/^sess_/);
+  });
+
+  it("M1: the reaper claims only expired suspended sessions and finalizes them", async () => {
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const orgId = "org_system";
+
+        // Expired suspended session (past deadline) → reapable.
+        const expiredRun = `run_${randomUUID()}`;
+        await repo.createRun({
+          id: expiredRun,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          input: { task: "x" },
+          promptSummary: "x"
+        });
+        await repo.updateRunStatus(expiredRun, "starting");
+        await repo.updateRunStatus(expiredRun, "running");
+        await repo.updateRunStatus(expiredRun, "completed");
+        const expiredSession = `sess_${randomUUID()}`;
+        await repo.promoteRunToSession({
+          sessionId: expiredSession,
+          runId: expiredRun,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          prompt: "x",
+          sandboxId: `sandbox_${randomUUID()}`,
+          sandboxState: "suspended",
+          idleDeadlineAt: new Date(Date.now() - 60_000) // already expired
+        });
+
+        // Fresh suspended session (future deadline) → NOT reapable.
+        const freshRun = `run_${randomUUID()}`;
+        await repo.createRun({
+          id: freshRun,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          input: { task: "y" },
+          promptSummary: "y"
+        });
+        await repo.updateRunStatus(freshRun, "starting");
+        await repo.updateRunStatus(freshRun, "running");
+        await repo.updateRunStatus(freshRun, "completed");
+        const freshSession = `sess_${randomUUID()}`;
+        await repo.promoteRunToSession({
+          sessionId: freshSession,
+          runId: freshRun,
+          orgId,
+          runtimeKind: "codex",
+          runtimeMode: "full_access",
+          prompt: "y",
+          sandboxId: `sandbox_${randomUUID()}`,
+          sandboxState: "suspended",
+          idleDeadlineAt: new Date(Date.now() + 10 * 60_000)
+        });
+
+        const claimed = await repo.claimReapableSessions(10);
+        const claimedIds = claimed.map((s) => s.id);
+        expect(claimedIds).toContain(expiredSession);
+        expect(claimedIds).not.toContain(freshSession);
+
+        // Finalize the reaped one.
+        await repo.markSessionSandboxDeleted(expiredSession);
+        const after = await repo.getSession(expiredSession, orgId);
+        expect(after?.sandboxState).toBe("deleted");
+        expect(after?.status).toBe("closed");
+
+        // A second sweep must NOT re-claim the finalized session.
+        const second = await repo.claimReapableSessions(10);
+        expect(second.map((s) => s.id)).not.toContain(expiredSession);
+      });
+    } finally {
+      client.release();
+    }
+  });
 });
 
 function authHeaders(apiKey: string, idempotencyKey?: string): Record<string, string> {

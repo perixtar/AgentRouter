@@ -52,7 +52,9 @@ export class DaytonaSandboxDriver {
           ephemeral: false,
           autoStopInterval: input.autoStopIntervalMinutes ?? 15,
           autoArchiveInterval: input.autoArchiveIntervalMinutes ?? 60,
-          autoDeleteInterval: input.autoDeleteIntervalMinutes ?? 1440
+          // Daytona-side backstop (default 90m, down from 24h). The app-side
+          // reaper normally reclaims well before this; it's the last-resort net.
+          autoDeleteInterval: input.autoDeleteIntervalMinutes ?? 90
         }
       : { ephemeral: true, autoDeleteInterval: 0 };
 

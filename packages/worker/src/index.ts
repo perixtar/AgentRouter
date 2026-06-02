@@ -49,6 +49,7 @@ export interface WorkerSandboxDriver {
     env?: Record<string, string>;
     persistent?: boolean;
     autoStopIntervalMinutes?: number;
+    autoDeleteIntervalMinutes?: number;
   }): Promise<{ id: string; name?: string }>;
   executeCommand(
     sandboxId: string,
@@ -82,6 +83,12 @@ export interface RunOneWorkerIterationInput {
   masterKey?: string;
   /** Idle minutes before a session's persistent sandbox auto-stops (default 15). */
   sessionAutoStopMinutes?: number;
+  /** Daytona-side auto-delete backstop for persistent sandboxes (default 90). */
+  sessionAutoDeleteMinutes?: number;
+  /** Minutes a finished one-shot sandbox stays suspended for a fast follow-up (default 10). */
+  oneShotGraceMinutes?: number;
+  /** Minutes a continued conversation may idle before the reaper deletes it (default 30). */
+  sessionIdleTtlMinutes?: number;
   baseEnv: NodeJS.ProcessEnv;
 }
 
@@ -102,8 +109,11 @@ export interface RunOneWorkerIterationResult {
 
 export interface RunWorkerLoopInput extends RunOneWorkerIterationInput {
   pollIntervalMs?: number;
+  /** How often the idle-sandbox reaper sweeps (seconds, default 60). */
+  reaperIntervalSeconds?: number;
   signal?: AbortSignal;
   onIteration?: (result: RunOneWorkerIterationResult) => void;
+  onReap?: (count: number) => void;
 }
 
 const repoDir = "/home/daytona/agentrouter/repo";
@@ -146,15 +156,67 @@ export async function runOneWorkerIteration(
 
 export async function runWorkerLoop(input: RunWorkerLoopInput): Promise<void> {
   const pollIntervalMs = input.pollIntervalMs ?? 1000;
+  let lastReapAt = 0;
 
   while (!input.signal?.aborted) {
     const result = await runOneWorkerIteration(input);
     input.onIteration?.(result);
 
+    // INVARIANT: no persistent sandbox lingers past its idle deadline. The
+    // reaper sweep runs on a timer regardless of run throughput, so a parked
+    // (grace-expired or idle) sandbox is always reclaimed.
+    const reapIntervalMs = (input.reaperIntervalSeconds ?? 60) * 1000;
+    if (Date.now() - lastReapAt >= reapIntervalMs) {
+      lastReapAt = Date.now();
+      const reaped = await reapExpiredSandboxes(input).catch(() => 0);
+      if (reaped > 0) input.onReap?.(reaped);
+    }
+
     if (!result.processed) {
       await sleep(pollIntervalMs, input.signal);
     }
   }
+}
+
+/**
+ * Deletes any persistent sandbox whose idle deadline has passed (grace-expired
+ * one-shots AND idle conversations are tracked uniformly as sessions). Each is
+ * atomically claimed (`for update skip locked` + state→'deleting') so parallel
+ * workers don't double-delete. Returns how many were reclaimed.
+ */
+export async function reapExpiredSandboxes(input: RunOneWorkerIterationInput): Promise<number> {
+  const claimed = await withClient(input, async (client) =>
+    new RunRepository(client).claimReapableSessions(10)
+  );
+
+  let reclaimed = 0;
+  for (const session of claimed) {
+    try {
+      if (session.sandboxId) {
+        await input.sandbox.deleteSandbox(session.sandboxId);
+      }
+    } catch {
+      // best-effort: if delete fails, still mark deleted so we don't spin on
+      // it forever; Daytona's autoDelete backstop is the final safety net.
+    }
+    await withClient(input, async (client) => {
+      const repo = new RunRepository(client);
+      await repo.markSessionSandboxDeleted(session.id);
+      if (session.originRunId) {
+        await repo
+          .appendEvent({
+            runId: session.originRunId,
+            source: "worker",
+            eventType: "sandbox.reclaimed",
+            visibility: "internal",
+            payload: { sandboxId: session.sandboxId, reason: "idle_deadline" }
+          })
+          .catch(() => undefined);
+      }
+    });
+    reclaimed += 1;
+  }
+  return reclaimed;
 }
 
 async function executeClaimedRun(
@@ -179,13 +241,19 @@ async function executeOneShotRun(
   let sandboxId: string | undefined;
   let stdout = "";
   let stderr = "";
+  // Continuable-one-shot grace: an exec-mode Codex run keeps its sandbox + Codex
+  // thread alive (suspended) for a short window so a fast follow-up via
+  // /v1/runs/:id/messages truly resumes it. auto_review (review is terminal) and
+  // claude_code (sessions are codex-only) stay ephemeral/delete-on-finish.
+  const graceEligible = isGraceEligibleRun(run);
+  let parkedAsSession = false;
 
   try {
-    // BYOK resolution: for an org run, the org's provider key (decrypted with
-    // the master key) is the ONLY credential used — no silent fallback to the
-    // global key. Legacy (org_id null) runs keep using the global key.
     const providerKeyOverride = await resolveOrgProviderKey(input, run);
-    const runtime = buildRuntimeLaunch(input, run, providerKeyOverride);
+    const runtime = buildRuntimeLaunch(input, run, providerKeyOverride, {
+      // For grace-eligible runs, run Codex non-ephemeral so the thread persists.
+      sessionMode: graceEligible
+    });
 
     await withClient(input, async (client) => {
       const repo = new RunRepository(client);
@@ -205,9 +273,15 @@ async function executeOneShotRun(
 
     const sandbox = await input.sandbox.createSandbox({
       name: sandboxName,
-      env: runtime.credentialBoundary.generalSandboxEnv
+      env: runtime.credentialBoundary.generalSandboxEnv,
+      // Grace-eligible runs need a persistent sandbox so we can suspend (not
+      // delete) it after the turn; the reaper guarantees eventual reclaim.
+      persistent: graceEligible,
+      autoStopIntervalMinutes: input.sessionAutoStopMinutes ?? 15,
+      autoDeleteIntervalMinutes: input.sessionAutoDeleteMinutes ?? 90
     });
     sandboxId = sandbox.id;
+    if (graceEligible) await input.sandbox.waitUntilReady?.(sandbox.id);
 
     await withClient(input, async (client) => {
       const repo = new RunRepository(client);
@@ -224,7 +298,7 @@ async function executeOneShotRun(
         source: "worker",
         eventType: "sandbox.created",
         visibility: "internal",
-        payload: { sandboxId: sandbox.id, provider: "daytona" }
+        payload: { sandboxId: sandbox.id, provider: "daytona", persistent: graceEligible }
       });
       await repo.updateRunStatus(run.id, "running");
     });
@@ -298,13 +372,66 @@ async function executeOneShotRun(
       });
       await repo.updateRunStatus(run.id, terminalSnapshot.status, terminalSnapshot.failure);
     });
+
+    // ── Grace park: a SUCCESSFUL grace-eligible run promotes to a session so a
+    //    within-grace follow-up resumes the same sandbox + Codex thread. The
+    //    reaper deletes it after the grace window if no follow-up arrives. ──
+    if (graceEligible && result.exitCode === 0) {
+      const codexSessionId = extractCodexSessionId(stdout);
+      const graceMinutes = input.oneShotGraceMinutes ?? 10;
+      const idleDeadlineAt = new Date(Date.now() + graceMinutes * 60_000);
+      try {
+        await input.sandbox.suspendSandbox?.(sandbox.id);
+        await withClient(input, async (client) => {
+          await new RunRepository(client).promoteRunToSession({
+            sessionId: `sess_${randomUUID()}`,
+            runId: run.id,
+            orgId: run.orgId ?? "",
+            runtimeKind: run.runtimeKind,
+            runtimeMode: run.runtimeMode,
+            runtimeModel: run.runtimeModel,
+            prompt: taskFromRun(run),
+            sandboxId: sandbox.id,
+            codexSessionId,
+            sandboxState: "suspended",
+            idleDeadlineAt
+          });
+        });
+        parkedAsSession = true;
+        await emitSessionEvent(input, run.id, "sandbox.parked", {
+          sandboxId: sandbox.id,
+          graceMinutes
+        }).catch(() => undefined);
+      } catch {
+        // If parking fails, fall through to the finally which deletes the
+        // sandbox — never leave it un-tracked and un-reapable.
+        parkedAsSession = false;
+      }
+    }
   } catch (error) {
     await markRunFailed(input, run.id, error);
   } finally {
-    if (sandboxId) {
+    // Delete only when NOT parked as a resumable session. A parked sandbox is
+    // owned by the reaper (idle_deadline_at) and reclaimed on expiry.
+    if (sandboxId && !parkedAsSession) {
       await input.sandbox.deleteSandbox(sandboxId);
     }
   }
+}
+
+/**
+ * Grace applies only to runs that can actually be continued AND belong to a
+ * tenant: Codex in an exec-mode (default/read_only/full_access) with an org.
+ * auto_review runs `codex review` (terminal) and claude_code isn't
+ * session-capable; legacy global-key runs (no org) keep the ephemeral
+ * delete-on-finish lifecycle.
+ */
+function isGraceEligibleRun(run: RunRecord): boolean {
+  return (
+    Boolean(run.orgId) &&
+    isCodexRunRecord(run) &&
+    ["default", "read_only", "full_access"].includes(run.runtimeMode)
+  );
 }
 
 /**
@@ -489,14 +616,16 @@ async function executeSessionRun(
     await markRunFailed(input, run.id, error);
   } finally {
     if (sandboxId && suspendInFinally) {
-      // Suspend (NOT delete) so the fs + Codex session survive for the next turn.
+      // Suspend (NOT delete) so the fs + Codex session survive for the next turn,
+      // and arm the reaper's idle deadline so it can never linger past the TTL.
       try {
         await input.sandbox.suspendSandbox?.(sandboxId);
+        const idleMinutes = input.sessionIdleTtlMinutes ?? 30;
+        const idleDeadlineAt = new Date(Date.now() + idleMinutes * 60_000);
         await withClient(input, async (client) => {
-          await new RunRepository(client).updateSessionSandbox({
-            sessionId,
-            sandboxState: "suspended"
-          });
+          const repo = new RunRepository(client);
+          await repo.updateSessionSandbox({ sessionId, sandboxState: "suspended" });
+          await repo.setSessionIdleDeadline({ sessionId, idleDeadlineAt });
         });
         await emitSessionEvent(input, run.id, "sandbox.suspended", { sandboxId }).catch(() => undefined);
       } catch {
@@ -656,7 +785,8 @@ function truncateFailureDetail(detail: string): string {
 function buildRuntimeLaunch(
   input: RunOneWorkerIterationInput,
   run: RunRecord,
-  providerKeyOverride?: string
+  providerKeyOverride?: string,
+  options: { sessionMode?: boolean } = {}
 ): RuntimeLaunch {
   if (isCodexRunRecord(run)) {
     // BYOK override (org run) takes precedence; global key is the legacy fallback.
@@ -670,14 +800,25 @@ function buildRuntimeLaunch(
       rawProviderKey: codexKey,
       baseEnv: input.baseEnv
     });
-    const launchPlan = buildCodexLaunchPlan({
-      mode: run.runtimeMode,
-      model: run.runtimeModel,
-      task: taskFromRun(run),
-      workdir: repoDir,
-      providerEnv: credentialBoundary.providerEnv,
-      reviewBase: undefined
-    });
+    // sessionMode: run Codex non-ephemeral (turn 1, resume:false) so the thread
+    // is persisted in CODEX_HOME and a within-grace follow-up can resume it.
+    const launchPlan = options.sessionMode
+      ? buildCodexSessionLaunchPlan({
+          mode: run.runtimeMode,
+          model: run.runtimeModel,
+          task: taskFromRun(run),
+          workdir: repoDir,
+          providerEnv: credentialBoundary.providerEnv,
+          resume: false
+        })
+      : buildCodexLaunchPlan({
+          mode: run.runtimeMode,
+          model: run.runtimeModel,
+          task: taskFromRun(run),
+          workdir: repoDir,
+          providerEnv: credentialBoundary.providerEnv,
+          reviewBase: undefined
+        });
 
     return {
       provider: "codex",

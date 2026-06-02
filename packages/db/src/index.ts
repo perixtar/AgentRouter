@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import {
   normalizeEventPayload,
@@ -118,7 +119,7 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
         title text,
         sandbox_id text,
         sandbox_state text not null default 'none'
-          check (sandbox_state in ('none', 'creating', 'running', 'suspended', 'deleted')),
+          check (sandbox_state in ('none', 'creating', 'running', 'suspended', 'deleting', 'deleted')),
         codex_session_id text,
         turn_count integer not null default 0,
         status text not null default 'active'
@@ -318,6 +319,37 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
     await client.query("create index if not exists runs_org_id_idx on runs(org_id)");
     // ── M4: a run may belong to a multi-turn session (null = one-shot). ──
     await client.query("alter table runs add column if not exists session_id text");
+    // ── Run-id multi-turn (M1): the run that seeded a conversation (the public
+    //    conversation handle) + an idle deadline the reaper enforces so a
+    //    persistent sandbox can never linger past its TTL. ──
+    await client.query("alter table sessions add column if not exists origin_run_id text");
+    await client.query("alter table sessions add column if not exists idle_deadline_at timestamptz");
+    await client.query("create index if not exists sessions_origin_run_id_idx on sessions(origin_run_id)");
+    await client.query("drop index if exists sessions_reap_idx");
+    await client.query(
+      "create index if not exists sessions_reap_idx on sessions(idle_deadline_at) where sandbox_state = 'suspended'"
+    );
+    await client.query("create index if not exists runs_session_id_idx on runs(session_id)");
+    // Allow the transient 'deleting' state the reaper uses while it claims a
+    // sandbox for deletion (idempotent: drop the old check + re-add widened).
+    await client.query(
+      "alter table sessions drop constraint if exists sessions_sandbox_state_check"
+    );
+    await client.query(`
+      do $$
+      begin
+        if not exists (
+          select 1 from pg_constraint
+          where conname = 'sessions_sandbox_state_check'
+            and conrelid = 'sessions'::regclass
+        ) then
+          alter table sessions
+          add constraint sessions_sandbox_state_check
+          check (sandbox_state in ('none', 'creating', 'running', 'suspended', 'deleting', 'deleted'));
+        end if;
+      end
+      $$;
+    `);
     await client.query("alter table runs drop constraint if exists runs_runtime_mode_check");
     await client.query("alter table runs drop constraint if exists runs_check");
     await client.query(
@@ -1188,6 +1220,166 @@ export class RunRepository {
     );
     return result.rows.map(mapTurn);
   }
+
+  // ── Run-id multi-turn (M1) ──
+
+  /**
+   * Resolves a run id to its conversation session (org-scoped). A run reaches
+   * a session either by being a turn (`runs.session_id`) or by being the
+   * conversation handle (`sessions.origin_run_id`). Returns undefined when the
+   * run isn't part of a conversation yet.
+   */
+  async findSessionByRunId(runId: string, orgId: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query(
+      `
+        select s.* from sessions s
+        where s.org_id = $2
+          and (
+            s.origin_run_id = $1
+            or s.id = (select r.session_id from runs r where r.id = $1 and r.org_id = $2)
+          )
+        limit 1
+      `,
+      [runId, orgId]
+    );
+    return result.rows[0] ? mapSession(result.rows[0]) : undefined;
+  }
+
+  /**
+   * Promotes a finished one-shot run into a conversation: creates the session
+   * keyed by the run (origin_run_id = runId), back-links the run, and records
+   * turn #1 — all in the caller's transaction. The persistent sandbox + Codex
+   * thread it parked carry over so a within-grace continuation truly resumes.
+   * Idempotent: if the run already has a session, returns it unchanged.
+   */
+  async promoteRunToSession(input: {
+    sessionId: string;
+    runId: string;
+    orgId: string;
+    runtimeKind: RuntimeKind;
+    runtimeMode: RuntimePermissionValue;
+    runtimeModel?: RuntimeModel;
+    prompt: string;
+    sandboxId: string;
+    codexSessionId?: string;
+    sandboxState: SessionRecord["sandboxState"];
+    idleDeadlineAt: Date;
+  }): Promise<SessionRecord> {
+    const existing = await this.findSessionByRunIdInternal(input.runId);
+    if (existing) return existing;
+
+    const result = await this.client.query(
+      `
+        insert into sessions
+          (id, org_id, runtime_kind, runtime_mode, runtime_model, origin_run_id,
+           sandbox_id, sandbox_state, codex_session_id, turn_count, idle_deadline_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10)
+        returning *
+      `,
+      [
+        input.sessionId,
+        input.orgId,
+        input.runtimeKind,
+        input.runtimeMode,
+        input.runtimeModel,
+        input.runId,
+        input.sandboxId,
+        input.sandboxState,
+        input.codexSessionId,
+        input.idleDeadlineAt
+      ]
+    );
+    await this.client.query(`update runs set session_id = $1 where id = $2`, [
+      input.sessionId,
+      input.runId
+    ]);
+    await this.client.query(
+      `insert into turns (id, session_id, org_id, run_id, turn_number, prompt)
+         values ($1, $2, $3, $4, 1, $5)
+       on conflict (session_id, turn_number) do nothing`,
+      [`turn_${randomUUID()}`, input.sessionId, input.orgId, input.runId, input.prompt]
+    );
+    return mapSession(result.rows[0]);
+  }
+
+  /** Unscoped session lookup by handle/turn run id (worker-internal). */
+  private async findSessionByRunIdInternal(runId: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query(
+      `
+        select s.* from sessions s
+        where s.origin_run_id = $1
+           or s.id = (select r.session_id from runs r where r.id = $1)
+        limit 1
+      `,
+      [runId]
+    );
+    return result.rows[0] ? mapSession(result.rows[0]) : undefined;
+  }
+
+  /** Sets the reaper deadline + sandbox state for a parked session. */
+  async setSessionIdleDeadline(input: {
+    sessionId: string;
+    idleDeadlineAt: Date;
+    sandboxState?: SessionRecord["sandboxState"];
+  }): Promise<void> {
+    await this.client.query(
+      `update sessions
+          set idle_deadline_at = $2,
+              sandbox_state = coalesce($3, sandbox_state),
+              updated_at = now()
+        where id = $1`,
+      [input.sessionId, input.idleDeadlineAt, input.sandboxState ?? null]
+    );
+  }
+
+  /**
+   * Atomically claims sessions whose sandbox is past its idle deadline so the
+   * reaper can delete them. `skip locked` + a status flip prevents two workers
+   * from reaping the same one. Returns the claimed sessions (with sandbox_id).
+   */
+  async claimReapableSessions(limit = 10): Promise<SessionRecord[]> {
+    const result = await this.client.query(
+      `
+        with candidates as (
+          select id from sessions
+          -- A suspended sandbox past its deadline is reclaimable whether the
+          -- conversation is still active (idle TTL / grace expiry) or was closed
+          -- by the client (/close arms an immediate-reclaim deadline).
+          where status in ('active', 'closed')
+            and sandbox_state = 'suspended'
+            and idle_deadline_at is not null
+            and idle_deadline_at < now()
+            -- never reap a session with an in-flight turn (defensive).
+            and not exists (
+              select 1 from runs r
+              where r.session_id = sessions.id
+                and r.status in ('queued', 'starting', 'running', 'cancelling')
+            )
+          order by idle_deadline_at asc
+          limit $1
+          for update skip locked
+        )
+        update sessions s
+        set sandbox_state = 'deleting', updated_at = now()
+        from candidates c
+        where s.id = c.id
+        returning s.*
+      `,
+      [Math.min(Math.max(limit, 1), 50)]
+    );
+    return result.rows.map(mapSession);
+  }
+
+  /** Finalizes a reaped session after its sandbox is deleted. */
+  async markSessionSandboxDeleted(sessionId: string): Promise<void> {
+    await this.client.query(
+      `update sessions
+          set sandbox_state = 'deleted', status = 'closed',
+              idle_deadline_at = null, updated_at = now()
+        where id = $1`,
+      [sessionId]
+    );
+  }
 }
 
 export interface SessionRecord {
@@ -1198,10 +1390,14 @@ export interface SessionRecord {
   runtimeModel?: RuntimeModel;
   title?: string;
   sandboxId?: string;
-  sandboxState: "none" | "creating" | "running" | "suspended" | "deleted";
+  sandboxState: "none" | "creating" | "running" | "suspended" | "deleting" | "deleted";
   codexSessionId?: string;
   turnCount: number;
   status: "active" | "closed";
+  /** The run that seeded this conversation (the public conversation handle). */
+  originRunId?: string;
+  /** When the reaper may delete the parked sandbox (null = not parked). */
+  idleDeadlineAt?: Date;
   createdAt: Date;
   updatedAt: Date;
   lastActiveAt: Date;
@@ -1230,6 +1426,8 @@ function mapSession(row: Record<string, unknown>): SessionRecord {
     codexSessionId: optionalString(row.codex_session_id),
     turnCount: Number(row.turn_count),
     status: String(row.status) as SessionRecord["status"],
+    originRunId: optionalString(row.origin_run_id),
+    idleDeadlineAt: optionalDate(row.idle_deadline_at),
     createdAt: row.created_at as Date,
     updatedAt: row.updated_at as Date,
     lastActiveAt: row.last_active_at as Date

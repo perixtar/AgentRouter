@@ -12,7 +12,11 @@ import {
   withSearchPath
 } from "@agentrouter/db";
 import { CREDENTIAL_BOUNDARY_PROBE_MARKER } from "@agentrouter/credential-boundary";
-import { runOneWorkerIteration, type WorkerSandboxDriver } from "@agentrouter/worker";
+import {
+  reapExpiredSandboxes,
+  runOneWorkerIteration,
+  type WorkerSandboxDriver
+} from "@agentrouter/worker";
 
 loadDotEnv();
 
@@ -524,6 +528,86 @@ describe("worker run-one orchestration", () => {
       await store.deleteRunPrefix(leakRunId);
     }
   }, 60_000);
+
+  it("reaps only expired suspended session sandboxes (the 30 GiB safety net)", async () => {
+    const reaperSandbox = new RecordingSandboxDriver();
+    const orgId = "org_reaper_test";
+    const expiredRun = `run_${randomUUID()}`;
+    const freshRun = `run_${randomUUID()}`;
+    const expiredSandboxId = `sandbox_expired_${randomUUID()}`;
+    const freshSandboxId = `sandbox_fresh_${randomUUID()}`;
+    let expiredSession = "";
+    let freshSession = "";
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        for (const [rid, sandboxId, deadlineMs, target] of [
+          [expiredRun, expiredSandboxId, -60_000, "expired"],
+          [freshRun, freshSandboxId, 10 * 60_000, "fresh"]
+        ] as const) {
+          await repo.createRun({
+            id: rid,
+            orgId,
+            runtimeKind: "codex",
+            runtimeMode: "full_access",
+            input: { task: "t" },
+            promptSummary: "t"
+          });
+          await repo.updateRunStatus(rid, "starting");
+          await repo.updateRunStatus(rid, "running");
+          await repo.updateRunStatus(rid, "completed");
+          const sid = `sess_${randomUUID()}`;
+          if (target === "expired") expiredSession = sid;
+          else freshSession = sid;
+          await repo.promoteRunToSession({
+            sessionId: sid,
+            runId: rid,
+            orgId,
+            runtimeKind: "codex",
+            runtimeMode: "full_access",
+            prompt: "t",
+            sandboxId,
+            sandboxState: "suspended",
+            idleDeadlineAt: new Date(Date.now() + deadlineMs)
+          });
+        }
+      });
+    } finally {
+      client.release();
+    }
+
+    const reaped = await reapExpiredSandboxes({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: reaperSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env
+    });
+
+    // Only the expired sandbox is deleted; the fresh one is untouched.
+    expect(reaped).toBe(1);
+    expect(reaperSandbox.deletedSandboxIds).toEqual([expiredSandboxId]);
+
+    const verifyClient = await pool.connect();
+    try {
+      await withSearchPath(verifyClient, schema, async () => {
+        const repo = new RunRepository(verifyClient);
+        const expired = await repo.getSession(expiredSession, orgId);
+        const fresh = await repo.getSession(freshSession, orgId);
+        expect(expired?.sandboxState).toBe("deleted");
+        expect(expired?.status).toBe("closed");
+        expect(fresh?.sandboxState).toBe("suspended");
+        expect(fresh?.status).toBe("active");
+      });
+    } finally {
+      verifyClient.release();
+    }
+  }, 30_000);
 });
 
 interface RecordingSandboxDriverOptions {

@@ -33,6 +33,12 @@ const workerInput = {
   testResourcePrefix: config.testResourcePrefix,
   codexApiKey: config.codexApiKey,
   anthropicApiKey: config.anthropicApiKey,
+  masterKey: config.masterKey,
+  // Multi-turn run lifecycle / sandbox reclaim TTLs (env-tunable via config).
+  oneShotGraceMinutes: config.oneShotGraceMinutes,
+  sessionIdleTtlMinutes: config.sessionIdleTtlMinutes,
+  sessionAutoStopMinutes: config.sessionAutoStopMinutes,
+  sessionAutoDeleteMinutes: config.sessionAutoDeleteMinutes,
   baseEnv: process.env
 };
 
@@ -45,10 +51,14 @@ if (process.env.AGENTROUTER_WORKER_RUN_ONCE === "1") {
   await runWorkerLoop({
     ...workerInput,
     pollIntervalMs: Number.parseInt(process.env.AGENTROUTER_WORKER_POLL_INTERVAL_MS ?? "1000", 10),
+    reaperIntervalSeconds: config.reaperIntervalSeconds,
     onIteration(result) {
       if (result.processed) {
         console.log(JSON.stringify(result));
       }
+    },
+    onReap(count) {
+      console.log(JSON.stringify({ reaped: count }));
     }
   });
 }

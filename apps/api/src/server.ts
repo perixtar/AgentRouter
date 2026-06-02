@@ -215,7 +215,7 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
       repo.listRuns({ orgId, status: query.status, limit: query.limit })
     );
 
-    return { items: runs.map(runToApi) };
+    return { items: runs.map((run) => runToApi(run)) };
   });
 
   server.post("/v1/runs", async (request, reply) => {
@@ -305,8 +305,19 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
 
   server.get("/v1/runs/:runId", async (request) => {
     const { runId } = runParams(request);
-    const run = await getRunOrThrow(input, runId, orgOf(request));
-    return runToApi(run);
+    const orgId = orgOf(request);
+    const data = await withRepository(input, async (repo) => {
+      const run = await repo.getRun(runId, orgId);
+      if (!run) return undefined;
+      // Resolve the conversation handle (first run id) when this run is part of
+      // one — additive, doesn't change the create contract.
+      const session = run.sessionId
+        ? await repo.findSessionByRunId(runId, orgId)
+        : undefined;
+      return { run, conversationId: session?.originRunId };
+    });
+    if (!data) throw new ApiError(404, "run_not_found", "Run not found");
+    return runToApi(data.run, { conversationId: data.conversationId ?? runId });
   });
 
   server.get("/v1/runs/:runId/events", async (request) => {
@@ -393,6 +404,118 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
     const run = await withRepository(input, async (repo) => repo.cancelRun(runId, orgId));
     if (!run) throw new ApiError(404, "run_not_found", "Run not found");
     return runToApi(run);
+  });
+
+  // ── Run-id multi-turn (M1): the run id is the conversation handle. ──
+
+  // Continue a conversation by run id. Resolves the run to its session (a
+  // grace-eligible run was promoted to one when it finished); enqueues the next
+  // turn using the same hardened atomic turn+run logic as /v1/sessions.
+  server.post("/v1/runs/:runId/messages", async (request, reply) => {
+    const { runId } = runParams(request);
+    const orgId = orgOf(request);
+    const parsed = sessionMessageSchema.parse(request.body);
+
+    const outcome = await withClient(input, async (client) => {
+      await client.query("begin");
+      try {
+        const repo = new RunRepository(client);
+        const run = await repo.getRun(runId, orgId);
+        if (!run) {
+          await client.query("rollback");
+          return { error: "run_not_found" as const };
+        }
+        const session = await repo.findSessionByRunId(runId, orgId);
+        if (!session) {
+          // The run finished but isn't continuable (never grace-eligible, or its
+          // grace window already lapsed and the reaper reclaimed the sandbox).
+          await client.query("rollback");
+          return { error: "not_continuable" as const };
+        }
+        const result = await enqueueTurn(repo, session, orgId, parsed.message);
+        if ("error" in result) {
+          await client.query("rollback");
+          return result;
+        }
+        await client.query("commit");
+        return { ...result, sessionId: session.id };
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      }
+    });
+
+    if ("error" in outcome) {
+      if (outcome.error === "run_not_found") throw new ApiError(404, "run_not_found", "Run not found");
+      if (outcome.error === "not_continuable") {
+        throw new ApiError(
+          409,
+          "run_not_continuable",
+          "This run is not continuable (no active conversation; its sandbox may have been reclaimed)"
+        );
+      }
+      if (outcome.error === "closed") throw new ApiError(409, "session_closed", "Conversation is closed");
+      throw new ApiError(409, "run_busy", "A turn is already in progress for this conversation");
+    }
+
+    reply.status(202);
+    return { runId: outcome.runId, turnNumber: outcome.turnNumber, conversationId: runId };
+  });
+
+  // List the turns of a conversation by its handle run id.
+  server.get("/v1/runs/:runId/turns", async (request) => {
+    const { runId } = runParams(request);
+    const orgId = orgOf(request);
+    const data = await withRepository(input, async (repo) => {
+      const run = await repo.getRun(runId, orgId);
+      if (!run) return undefined;
+      const session = await repo.findSessionByRunId(runId, orgId);
+      if (!session) {
+        // A standalone (uncontinued) run is a single implicit turn.
+        return {
+          conversationId: runId,
+          turns: [
+            { id: runId, runId, turnNumber: 1, prompt: run.promptSummary, createdAt: run.queuedAt }
+          ]
+        };
+      }
+      const turns = await repo.listTurns(session.id, orgId);
+      return { conversationId: session.originRunId ?? runId, turns };
+    });
+    if (!data) throw new ApiError(404, "run_not_found", "Run not found");
+    return {
+      conversationId: data.conversationId,
+      items: data.turns.map((t) => ({
+        id: t.id,
+        runId: t.runId,
+        turnNumber: t.turnNumber,
+        prompt: t.prompt,
+        createdAt:
+          t.createdAt instanceof Date ? t.createdAt.toISOString() : new Date(t.createdAt).toISOString()
+      }))
+    };
+  });
+
+  // Close a conversation by run id → immediate sandbox reclaim (sets the reaper
+  // deadline to now so the next sweep deletes it; closes the session).
+  server.post("/v1/runs/:runId/close", async (request) => {
+    const { runId } = runParams(request);
+    const orgId = orgOf(request);
+    const result = await withRepository(input, async (repo) => {
+      const run = await repo.getRun(runId, orgId);
+      if (!run) return { error: "run_not_found" as const };
+      const session = await repo.findSessionByRunId(runId, orgId);
+      if (!session) return { closed: true, conversationId: runId, reclaimed: false };
+      // Arm immediate reclaim, then close. The worker reaper deletes the sandbox
+      // on its next sweep; we never block the request on Daytona.
+      if (session.sandboxState === "suspended" || session.sandboxState === "running") {
+        await repo.setSessionIdleDeadline({ sessionId: session.id, idleDeadlineAt: new Date(0) });
+      }
+      await repo.closeSession(session.id, orgId);
+      return { closed: true, conversationId: session.originRunId ?? runId, reclaimed: true };
+    });
+    if ("error" in result) throw new ApiError(404, "run_not_found", "Run not found");
+    return result;
   });
 
   server.get("/v1/runs/:runId/artifacts", async (request) => {
@@ -532,7 +655,7 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
 
     // Atomic: the turn row + run row are created in ONE transaction so a
     // turn-number collision (or any error) rolls back BOTH — never an orphan
-    // run that the worker would pick up untracked. (Bug 1 fix.)
+    // run that the worker would pick up untracked. (Shared with /v1/runs/:id/messages.)
     const result = await withClient(input, async (client) => {
       await client.query("begin");
       try {
@@ -542,49 +665,13 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
           await client.query("rollback");
           return { error: "not_found" as const };
         }
-        if (session.status !== "active") {
+        const turn = await enqueueTurn(repo, session, orgId, parsed.message);
+        if ("error" in turn) {
           await client.query("rollback");
-          return { error: "closed" as const };
+          return turn;
         }
-
-        // Concurrency guard: atomically reject a 2nd in-flight turn.
-        const claimed = await repo.beginSessionTurn(sessionId, orgId);
-        if (!claimed) {
-          await client.query("rollback");
-          return { error: "busy" as const };
-        }
-
-        // Turn number derived from actual turns (max+1), independent of the
-        // success/failure of prior turns — a failed turn never wedges this.
-        const turnNumber = await repo.nextTurnNumber(sessionId);
-        const runId = `run_${randomUUID()}`;
-        // Turn first: if its UNIQUE(session_id, turn_number) collides, we roll
-        // back before any run is enqueued.
-        await repo.createTurn({
-          id: `turn_${randomUUID()}`,
-          sessionId,
-          orgId,
-          runId,
-          turnNumber,
-          prompt: parsed.message
-        });
-        await repo.createRun({
-          id: runId,
-          orgId,
-          sessionId,
-          runtimeKind: "codex",
-          runtimeMode: session.runtimeMode,
-          runtimeModel: session.runtimeModel,
-          input: { task: parsed.message, runtime: { kind: "codex", mode: session.runtimeMode } },
-          promptSummary: parsed.message.slice(0, 500)
-        });
-
-        // Keep the display counter equal to the number of turns started, so it
-        // never drifts on failed turns (correctness no longer depends on it).
-        await repo.setSessionTurnCount(sessionId, turnNumber);
-
         await client.query("commit");
-        return { runId, turnNumber };
+        return turn;
       } catch (error) {
         await client.query("rollback");
         throw error;
@@ -679,6 +766,48 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
 
 function sessionParams(request: FastifyRequest): { sessionId: string } {
   return z.object({ sessionId: z.string().min(1) }).parse(request.params);
+}
+
+/**
+ * Atomically enqueues the next turn of a conversation: concurrency-guards the
+ * session, derives the turn number from the actual turns (max+1), creates the
+ * turn row then the run (turn-first so a UNIQUE collision rolls back before any
+ * run is enqueued). MUST run inside a transaction owned by the caller. Shared by
+ * /v1/sessions/:id/messages and /v1/runs/:id/messages so there's one hardened path.
+ */
+async function enqueueTurn(
+  repo: RunRepository,
+  session: SessionRecord,
+  orgId: string,
+  message: string
+): Promise<{ runId: string; turnNumber: number } | { error: "closed" | "busy" }> {
+  if (session.status !== "active") return { error: "closed" };
+
+  const claimed = await repo.beginSessionTurn(session.id, orgId);
+  if (!claimed) return { error: "busy" };
+
+  const turnNumber = await repo.nextTurnNumber(session.id);
+  const runId = `run_${randomUUID()}`;
+  await repo.createTurn({
+    id: `turn_${randomUUID()}`,
+    sessionId: session.id,
+    orgId,
+    runId,
+    turnNumber,
+    prompt: message
+  });
+  await repo.createRun({
+    id: runId,
+    orgId,
+    sessionId: session.id,
+    runtimeKind: "codex",
+    runtimeMode: session.runtimeMode,
+    runtimeModel: session.runtimeModel,
+    input: { task: message, runtime: { kind: "codex", mode: session.runtimeMode } },
+    promptSummary: message.slice(0, 500)
+  });
+  await repo.setSessionTurnCount(session.id, turnNumber);
+  return { runId, turnNumber };
 }
 
 class ApiError extends Error {
@@ -849,7 +978,10 @@ function turnToApi(turn: TurnRecord): Record<string, unknown> {
   };
 }
 
-function runToApi(run: RunRecord): Record<string, unknown> {
+function runToApi(
+  run: RunRecord,
+  extras: { conversationId?: string } = {}
+): Record<string, unknown> {
   return {
     id: run.id,
     status: run.status,
@@ -857,6 +989,11 @@ function runToApi(run: RunRecord): Record<string, unknown> {
     task: run.promptSummary,
     input: run.input,
     lastEventSeq: Number(run.lastEventSeq),
+    // Multi-turn (additive): the conversation this run belongs to. `sessionId`
+    // is the internal session id (null for an uncontinued one-shot); the public
+    // conversation handle is the first run's id.
+    sessionId: run.sessionId ?? null,
+    conversationId: extras.conversationId ?? run.id,
     queuedAt: run.queuedAt.toISOString(),
     startedAt: run.startedAt?.toISOString(),
     completedAt: run.completedAt?.toISOString(),
