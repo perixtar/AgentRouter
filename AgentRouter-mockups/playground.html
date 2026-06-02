@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="green">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentRouter — Playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --font-sans:"Geist","SF Pro Text",system-ui,-apple-system,sans-serif;
+  --font-mono:"Geist Mono","SF Mono",ui-monospace,Menlo,monospace;
+  --r-sm:5px; --r-md:8px; --r-lg:12px; --r-xl:16px;
+  --ease:cubic-bezier(.32,.72,.34,1);
+  --acc:oklch(0.80 0.155 152); --acc-ink:#06140c;
+  --acc-soft:oklch(0.80 0.155 152/.12); --acc-line:oklch(0.80 0.155 152/.32);
+  --ok:oklch(0.80 0.15 152); --warn:oklch(0.82 0.15 80);
+  --danger:oklch(0.68 0.19 25); --info:oklch(0.74 0.13 245);
+  --row-h:42px; --pad:18px;
+}
+[data-theme="dark"]{
+  --bg:oklch(0.165 0.006 256); --bg-1:oklch(0.195 0.007 256); --bg-2:oklch(0.225 0.008 256);
+  --bg-3:oklch(0.255 0.009 256); --bg-inset:oklch(0.145 0.006 256);
+  --line:oklch(0.30 0.009 256); --line-soft:oklch(0.255 0.008 256); --line-strong:oklch(0.38 0.01 256);
+  --tx:oklch(0.96 0.004 256); --tx-2:oklch(0.74 0.008 256); --tx-3:oklch(0.56 0.009 256); --tx-4:oklch(0.44 0.009 256);
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35); --shadow-lg:0 12px 48px rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+[data-theme="light"]{
+  --bg:oklch(0.985 0.002 256); --bg-1:oklch(1 0 0); --bg-2:oklch(0.975 0.003 256);
+  --bg-3:oklch(0.955 0.004 256); --bg-inset:oklch(0.965 0.003 256);
+  --line:oklch(0.90 0.004 256); --line-soft:oklch(0.935 0.003 256); --line-strong:oklch(0.84 0.006 256);
+  --tx:oklch(0.22 0.01 256); --tx-2:oklch(0.42 0.01 256); --tx-3:oklch(0.56 0.009 256); --tx-4:oklch(0.66 0.008 256);
+  --shadow:0 1px 2px rgba(20,22,28,.06),0 8px 24px rgba(20,22,28,.07); --shadow-lg:0 16px 50px rgba(20,22,28,.14);
+  color-scheme:light;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{height:100%;}
+body{font-family:var(--font-sans); background:var(--bg); color:var(--tx);
+  -webkit-font-smoothing:antialiased; font-size:14px; line-height:1.45; letter-spacing:-0.005em; overflow:hidden;}
+.mono{font-family:var(--font-mono); font-feature-settings:"ss01","zero";}
+.tnum{font-variant-numeric:tabular-nums;}
+a{color:inherit; text-decoration:none;}
+button{font-family:inherit;}
+::selection{background:var(--acc-soft);}
+*::-webkit-scrollbar{width:10px;height:10px;}
+*::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px;border:2px solid transparent;background-clip:content-box;}
+*::-webkit-scrollbar-track{background:transparent;}
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes fadeUp{from{transform:translateY(7px);opacity:0}to{transform:none;opacity:1}}
+@keyframes streamIn{from{transform:translateX(-7px);opacity:0}to{transform:none;opacity:1}}
+.fade-up{animation:fadeUp .32s var(--ease) both;}
+
+/* ── layout ── */
+.app{display:flex; height:100vh;}
+.sidebar{width:232px; flex:none; background:var(--bg); border-right:1px solid var(--line-soft);
+  display:flex; flex-direction:column; padding:14px 13px 12px;}
+.main{flex:1; min-width:0; display:flex; flex-direction:column;}
+.topbar{height:56px; flex:none; border-bottom:1px solid var(--line-soft);
+  background:color-mix(in oklch, var(--bg) 86%, transparent); backdrop-filter:blur(12px);
+  display:flex; align-items:center; padding:0 22px; gap:16px;}
+.content{flex:1; overflow-y:auto;}
+
+/* ── brand / sidebar ── */
+.brand{display:flex; align-items:center; gap:10px; padding:4px 6px 14px;}
+.brand-logo{width:27px;height:27px;border-radius:7px;background:var(--acc);display:grid;place-items:center;flex:none;}
+.brand-name{font-size:14.5px;font-weight:640;letter-spacing:-.02em;}
+.brand-sub{font-size:10.5px;color:var(--tx-4);font-weight:500;letter-spacing:.02em;}
+.env{display:flex;align-items:center;gap:8px;width:100%;height:36px;padding:0 10px;margin-bottom:14px;
+  border-radius:8px;border:1px solid var(--line);background:var(--bg-1);cursor:pointer;color:var(--tx);}
+.env-name{font-size:12.5px;font-weight:560;}
+.env-meta{font-size:10.5px;color:var(--tx-4);}
+.nav{display:flex;flex-direction:column;gap:2px;}
+.nav-item{display:flex;align-items:center;gap:10px;width:100%;height:34px;padding:0 9px;border-radius:7px;
+  cursor:pointer;border:none;text-align:left;position:relative;background:transparent;color:var(--tx-3);
+  transition:all .13s var(--ease);font-size:13.5px;font-weight:480;}
+.nav-item:hover{background:var(--bg-1);color:var(--tx);}
+.nav-item.on{background:var(--bg-2);color:var(--tx);font-weight:560;}
+.nav-item.on::before{content:"";position:absolute;left:-9px;top:8px;bottom:8px;width:2.5px;border-radius:9px;background:var(--acc);}
+.nav-item .ic{color:inherit;}
+.nav-item.on .ic{color:var(--acc);}
+.spacer{flex:1;}
+.usage{background:var(--bg-1);border:1px solid var(--line-soft);border-radius:10px;padding:12px;margin-bottom:10px;}
+.usage-bar{height:5px;border-radius:9px;background:var(--bg-3);overflow:hidden;}
+.usage-bar > i{display:block;width:68%;height:100%;background:var(--acc);border-radius:9px;}
+.account{display:flex;align-items:center;gap:9px;width:100%;padding:7px 8px;border-radius:8px;border:none;background:transparent;cursor:pointer;color:var(--tx-2);}
+.avatar{width:26px;height:26px;border-radius:7px;background:var(--bg-3);display:grid;place-items:center;font-size:11.5px;font-weight:600;color:var(--tx-2);}
+
+/* ── topbar ── */
+.crumbs{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--tx-4);margin-bottom:1px;}
+.title{font-size:16px;font-weight:600;letter-spacing:-.02em;}
+.search{display:flex;align-items:center;gap:8px;height:33px;padding:0 11px 0 10px;border-radius:8px;
+  border:1px solid var(--line-soft);background:var(--bg-1);cursor:pointer;color:var(--tx-4);min-width:190px;}
+.kbd{font-size:10.5px;padding:2px 5px;border-radius:4px;background:var(--bg-3);color:var(--tx-3);}
+.iconbtn{width:32px;height:32px;border-radius:7px;display:grid;place-items:center;cursor:pointer;
+  border:1px solid transparent;background:transparent;color:var(--tx-3);transition:all .14s var(--ease);flex:none;}
+.iconbtn:hover{background:var(--bg-2);color:var(--tx);border-color:var(--line);}
+
+/* ── primitives ── */
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--tx-4);}
+.badge{display:inline-flex;align-items:center;gap:5px;height:21px;padding:0 8px;border-radius:6px;
+  font-size:11.5px;font-weight:540;line-height:1;white-space:nowrap;}
+.badge.ok{color:var(--ok);background:color-mix(in oklch,var(--ok) 13%,transparent);border:1px solid color-mix(in oklch,var(--ok) 26%,transparent);}
+.badge.warn{color:var(--warn);background:color-mix(in oklch,var(--warn) 13%,transparent);border:1px solid color-mix(in oklch,var(--warn) 26%,transparent);}
+.badge.info{color:var(--info);background:color-mix(in oklch,var(--info) 13%,transparent);border:1px solid color-mix(in oklch,var(--info) 26%,transparent);}
+.badge.mute{color:var(--tx-3);background:color-mix(in oklch,var(--tx-4) 13%,transparent);border:1px solid var(--line-soft);}
+.badge.acc{color:var(--acc);background:var(--acc-soft);border:1px solid var(--acc-line);}
+.dot{width:7px;height:7px;border-radius:99px;flex:none;display:inline-block;}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 3px color-mix(in oklch,var(--ok) 18%,transparent);}
+.dot.info{background:var(--info);box-shadow:0 0 0 3px color-mix(in oklch,var(--info) 18%,transparent);}
+.dot.warn{background:var(--warn);box-shadow:0 0 0 3px color-mix(in oklch,var(--warn) 18%,transparent);}
+.dot.mute{background:var(--tx-4);}
+.dot.live{background:var(--acc);box-shadow:0 0 0 3px color-mix(in oklch,var(--acc) 18%,transparent);animation:pulse-dot 1.4s var(--ease) infinite;}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 13px;border-radius:7px;
+  font-size:13.5px;font-weight:540;cursor:pointer;white-space:nowrap;border:1px solid transparent;transition:all .14s var(--ease);user-select:none;}
+.btn.sm{height:28px;padding:0 10px;font-size:12.5px;}
+.btn.primary{background:var(--acc);color:var(--acc-ink);}
+.btn.primary:hover{background:color-mix(in oklch,var(--acc) 90%,white);}
+.btn.default{background:var(--bg-2);color:var(--tx);border-color:var(--line);}
+.btn.default:hover{background:var(--bg-3);}
+.btn.ghost{background:transparent;color:var(--tx-2);}
+.btn.ghost:hover{background:var(--bg-2);}
+.btn.okgh{background:transparent;color:var(--acc);border-color:var(--acc-line);}
+.btn.okgh:hover{background:var(--acc-soft);}
+.btn.danger{background:transparent;color:var(--danger);border-color:color-mix(in oklch,var(--danger) 34%,transparent);}
+.btn.danger:hover{background:color-mix(in oklch,var(--danger) 16%,transparent);}
+.card{background:var(--bg-1);border:1px solid var(--line-soft);border-radius:var(--r-lg);}
+.svg{display:block;flex:none;}
+
+/* ── window (the "computer") ── */
+.win{background:var(--bg-inset);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;}
+.win-bar{display:flex;align-items:center;gap:10px;height:38px;padding:0 12px;border-bottom:1px solid var(--line-soft);background:var(--bg-1);flex:none;}
+.lights{display:flex;gap:6px;}
+.lights span{width:10px;height:10px;border-radius:99px;}
+.win-title{font-size:11.5px;color:var(--tx-4);}
+.win-body{flex:1;overflow:auto;}
+.term{padding:13px 15px;font-size:12px;line-height:1.85;height:420px;overflow-y:auto;}
+.term .cmd{color:var(--tx);} .term .dim{color:var(--tx-4);} .term .ok{color:var(--acc);}
+.term .warn{color:var(--warn);} .term .step{color:var(--tx-2);}
+.term .ln{white-space:pre-wrap;animation:streamIn .26s var(--ease) both;}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--acc);vertical-align:-2px;animation:pulse-dot 1s steps(2) infinite;}
+.tabbar{display:inline-flex;gap:2px;padding:3px;background:var(--bg-inset);border:1px solid var(--line-soft);border-radius:9px;}
+.tab{height:28px;padding:0 12px;border-radius:6px;font-size:12.5px;font-weight:540;cursor:pointer;border:none;
+  background:transparent;color:var(--tx-3);display:inline-flex;align-items:center;gap:6px;transition:all .14s var(--ease);}
+.tab.on{background:var(--bg-2);color:var(--tx);box-shadow:var(--shadow);}
+
+/* ── files / diff ── */
+.filerow{display:flex;align-items:center;gap:10px;padding:9px 15px;border-bottom:1px solid var(--line-soft);font-size:12.5px;}
+.fstat{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:10.5px;font-weight:700;font-family:var(--font-mono);flex:none;}
+.fstat.A{color:var(--ok);background:color-mix(in oklch,var(--ok) 15%,transparent);}
+.fstat.M{color:var(--warn);background:color-mix(in oklch,var(--warn) 15%,transparent);}
+.fstat.D{color:var(--danger);background:color-mix(in oklch,var(--danger) 15%,transparent);}
+.diff{font-family:var(--font-mono);font-size:12px;line-height:1.7;padding:8px 0;}
+.diff .dl{padding:0 15px;white-space:pre-wrap;}
+.diff .h{color:var(--tx-4);background:var(--bg-1);}
+.diff .add{color:var(--ok);background:color-mix(in oklch,var(--ok) 9%,transparent);}
+.diff .del{color:var(--danger);background:color-mix(in oklch,var(--danger) 9%,transparent);}
+.diff .ctx{color:var(--tx-3);}
+
+/* ── chat ── */
+.chat{display:flex;flex-direction:column;height:100%;}
+.chat-scroll{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px;}
+.msg{display:flex;flex-direction:column;gap:6px;animation:fadeUp .3s var(--ease) both;}
+.msg .who{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--tx-4);}
+.bubble{border-radius:12px;padding:12px 14px;font-size:13.5px;line-height:1.55;max-width:92%;}
+.msg.user{align-items:flex-end;}
+.msg.user .bubble{background:var(--acc-soft);border:1px solid var(--acc-line);color:var(--tx);}
+.msg.agent .bubble{background:var(--bg-1);border:1px solid var(--line-soft);color:var(--tx-2);}
+.steptag{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:5px;}
+.steptag.model{color:var(--info);background:color-mix(in oklch,var(--info) 12%,transparent);}
+.steptag.tool{color:var(--ok);background:color-mix(in oklch,var(--ok) 12%,transparent);}
+.codeline{font-family:var(--font-mono);font-size:12px;background:var(--bg-inset);border:1px solid var(--line-soft);border-radius:8px;padding:9px 11px;color:var(--tx-2);margin-top:6px;white-space:pre-wrap;}
+.composer{flex:none;border-top:1px solid var(--line-soft);padding:14px 16px;background:var(--bg);}
+.byok-chip{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--tx-3);margin-bottom:9px;}
+.inputrow{display:flex;gap:9px;align-items:flex-end;}
+.taskinput{flex:1;min-height:42px;max-height:120px;padding:11px 13px;border-radius:9px;border:1px solid var(--line);
+  background:var(--bg-inset);color:var(--tx);font-size:13.5px;font-family:inherit;resize:none;outline:none;}
+.taskinput:focus{border-color:var(--acc-line);}
+
+/* ── keys / code ── */
+.section{padding:22px 24px 40px;max-width:1180px;margin:0 auto;}
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.sec-title{font-size:15px;font-weight:600;}
+.tablehead,.keyrow{display:grid;grid-template-columns:minmax(150px,1.4fr) 200px 1.4fr 110px 90px 80px;gap:14px;align-items:center;padding:0 16px;}
+.tablehead{height:36px;border-bottom:1px solid var(--line);font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--tx-4);background:var(--bg-inset);}
+.keyrow{height:56px;border-bottom:1px solid var(--line-soft);}
+.keyrow:hover{background:var(--bg-1);}
+.chip{font-family:var(--font-mono);font-size:10.5px;padding:2px 6px;border-radius:5px;background:var(--bg-2);border:1px solid var(--line-soft);color:var(--tx-3);}
+.code{background:var(--bg-inset);border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+.code-bar{display:flex;align-items:center;justify-content:space-between;height:36px;padding:0 8px 0 13px;border-bottom:1px solid var(--line-soft);background:var(--bg-1);}
+.code pre{margin:0;padding:14px 16px;font-size:12.5px;line-height:1.75;overflow-x:auto;color:var(--tx-2);}
+.tok-str{color:var(--acc);} .tok-kw{color:var(--info);} .tok-num{color:var(--warn);} .tok-com{color:var(--tx-4);} .tok-fn{color:var(--tx);} .tok-env{color:var(--warn);}
+.provcard{display:flex;align-items:center;gap:16px;padding:16px 18px;border:1px solid var(--line-soft);border-radius:12px;background:var(--bg-1);margin-bottom:12px;}
+.provlogo{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;flex:none;font-weight:700;font-size:15px;}
+.modal-bg{position:fixed;inset:0;background:color-mix(in oklch,var(--bg-inset) 70%,transparent);backdrop-filter:blur(3px);z-index:100;display:grid;place-items:center;}
+.modal{width:480px;background:var(--bg-1);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow-lg);overflow:hidden;animation:fadeUp .2s var(--ease);}
+.field{width:100%;height:38px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg-inset);color:var(--tx);font-size:13px;outline:none;}
+.hidden{display:none !important;}
+.endpoint{display:grid;grid-template-columns:64px 1fr;gap:14px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line-soft);font-size:13px;}
+.method{font-family:var(--font-mono);font-size:11px;font-weight:600;padding:3px 7px;border-radius:5px;text-align:center;}
+.method.get{color:var(--info);background:color-mix(in oklch,var(--info) 12%,transparent);}
+.method.post{color:var(--ok);background:color-mix(in oklch,var(--ok) 12%,transparent);}
+.qstep{display:flex;gap:14px;padding-bottom:22px;position:relative;}
+.qstep .num{width:29px;height:29px;border-radius:9px;flex:none;display:grid;place-items:center;font-size:13px;font-weight:600;z-index:1;background:var(--bg-2);color:var(--tx-2);border:1px solid var(--line);}
+.qstep.first .num{background:var(--acc);color:var(--acc-ink);border:none;}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ───────── Sidebar ───────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--acc-ink)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 6h6m8 0h-3M5 18h3m11 0h-6M5 12h14"/><circle cx="14" cy="6" r="2.3" fill="var(--acc-ink)" stroke="none"/><circle cx="10" cy="18" r="2.3" fill="var(--acc-ink)" stroke="none"/><circle cx="6" cy="12" r="2.3" fill="var(--acc-ink)" stroke="none"/>
+        </svg>
+      </div>
+      <div style="line-height:1.1">
+        <div class="brand-name">AgentRouter</div>
+        <div class="brand-sub">control plane</div>
+      </div>
+    </div>
+    <button class="env">
+      <span class="dot ok"></span>
+      <div style="flex:1;text-align:left;line-height:1.15">
+        <div class="env-name">Acme Inc</div>
+        <div class="env-meta">production · us-east</div>
+      </div>
+      <svg class="svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx-4)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <div class="nav" id="nav">
+      <button class="nav-item on" data-route="playground">
+        <svg class="svg ic" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
+        <span style="flex:1">Playground</span>
+      </button>
+      <button class="nav-item" data-route="keys">
+        <svg class="svg ic" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a4 4 0 10-3.5 3.97L11 14l2 0 0 2 2 0 0 2 2.5 0 0-2.5L14 12.5A4 4 0 0014 9z"/></svg>
+        <span style="flex:1">API Keys</span>
+      </button>
+    </div>
+    <div class="spacer"></div>
+    <div class="usage">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <span style="font-size:11.5px;color:var(--tx-3);font-weight:540">Run usage</span>
+        <span class="mono" style="font-size:11px;color:var(--tx-4)">68%</span>
+      </div>
+      <div class="usage-bar"><i></i></div>
+      <div style="font-size:11px;color:var(--tx-4);margin-top:7px">2.7M / 4.0M runs · resets Jun 1</div>
+    </div>
+    <button class="account">
+      <div class="avatar">DK</div>
+      <div style="flex:1;text-align:left;line-height:1.2">
+        <div style="font-size:12.5px;font-weight:540;color:var(--tx)">Dana Kim</div>
+        <div style="font-size:10.5px;color:var(--tx-4)">dana@acme.io</div>
+      </div>
+      <svg class="svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--tx-4)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9a3 3 0 100 6 3 3 0 000-6zm9 3l-2 .5-.6 1.5 1 1.8-1.4 1.4-1.8-1-1.5.6L14 21h-2l-.5-2-1.5-.6-1.8 1-1.4-1.4 1-1.8L7 14.5 5 14v-2l2-.5.6-1.5-1-1.8 1.4-1.4 1.8 1 1.5-.6L10 4h2l.5 2 1.5.6 1.8-1 1.4 1.4-1 1.8.6 1.5 2 .5z"/></svg>
+    </button>
+  </aside>
+
+  <!-- ───────── Main ───────── -->
+  <div class="main">
+    <header class="topbar">
+      <div style="flex:1;min-width:0">
+        <div class="crumbs"><span>Acme Inc</span></div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <h1 class="title" id="pageTitle">Playground</h1>
+          <span class="badge acc" id="pageBadge"><span class="dot live"></span>live SDK</span>
+        </div>
+      </div>
+      <button class="search"><svg class="svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4a7 7 0 105 11.9L20 20"/></svg><span style="font-size:12.5px;flex:1;text-align:left">Search or jump to…</span><kbd class="kbd mono">⌘K</kbd></button>
+      <button class="iconbtn" id="themeBtn" title="Toggle theme"><svg class="svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/></svg></button>
+    </header>
+
+    <div class="content">
+
+      <!-- ════════ PLAYGROUND ════════ -->
+      <section id="page-playground">
+        <div style="display:grid;grid-template-columns:minmax(360px,0.85fr) 1.15fr;height:calc(100vh - 56px)">
+          <!-- chat -->
+          <div class="chat" style="border-right:1px solid var(--line-soft)">
+            <div class="chat-scroll" id="chatScroll">
+              <div class="msg user">
+                <div class="who">you</div>
+                <div class="bubble">Create <span class="mono">reports/agent-smoke.txt</span> containing <span class="mono">AR_CODEX_OK</span>, then summarize the change in one line.</div>
+              </div>
+              <div class="msg agent">
+                <div class="who"><span class="dot info"></span>support-agent · gpt</div>
+                <div><span class="steptag model">model · reasoning</span></div>
+                <div class="bubble">I'll create the file with a shell command, confirm it exists, then give you a one-line summary.</div>
+              </div>
+              <div class="msg agent">
+                <div class="who"><span class="dot ok"></span>support-agent</div>
+                <div><span class="steptag tool">tool · shell</span></div>
+                <div class="bubble">Running the file write in the sandbox.
+                  <div class="codeline">$ mkdir -p reports && printf 'AR_CODEX_OK\n' > reports/agent-smoke.txt</div>
+                </div>
+              </div>
+              <div class="msg agent">
+                <div class="who"><span class="dot ok"></span>support-agent</div>
+                <div class="bubble">Done — created <span class="mono">reports/agent-smoke.txt</span> with a single line <span class="mono">AR_CODEX_OK</span>; no other files touched. ✅</div>
+              </div>
+            </div>
+            <div class="composer">
+              <div class="byok-chip"><span class="dot ok"></span> Running on <strong style="color:var(--tx-2);font-weight:600">your OpenAI key</strong> · <span class="mono">sk-proj-••••EgGT</span></div>
+              <div class="inputrow">
+                <textarea class="taskinput" id="taskInput" placeholder="Describe a task for your agent…" rows="1"></textarea>
+                <button class="btn primary" id="runBtn"><svg class="svg" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M7 4l13 8-13 8V4z"/></svg>Run</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- computer -->
+          <div style="padding:18px;min-width:0;display:flex;flex-direction:column;gap:12px;background:var(--bg)">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div class="tabbar" id="compTabs">
+                <button class="tab on" data-tab="term">Terminal</button>
+                <button class="tab" data-tab="files">Files <span class="badge mute" style="height:16px;padding:0 5px;font-size:10px">2</span></button>
+              </div>
+              <span class="badge ok" id="runStatus"><span class="dot ok"></span>completed · 3.1s</span>
+            </div>
+
+            <div class="win" style="flex:1">
+              <div class="win-bar">
+                <div class="lights">
+                  <span style="background:color-mix(in oklch,var(--danger) 75%,transparent)"></span>
+                  <span style="background:color-mix(in oklch,var(--warn) 75%,transparent)"></span>
+                  <span style="background:color-mix(in oklch,var(--ok) 75%,transparent)"></span>
+                </div>
+                <span class="win-title mono" style="flex:1;text-align:center">ar-phase1-test · run_a91f4c · Daytona sandbox</span>
+                <button class="iconbtn" id="replayBtn" style="width:26px;height:26px" title="Replay"><svg class="svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2 6m2 2v-5h-5"/></svg></button>
+              </div>
+              <div class="win-body">
+                <!-- terminal -->
+                <div class="term mono" id="termPane"></div>
+                <!-- files -->
+                <div id="filesPane" class="hidden">
+                  <div class="filerow"><span class="fstat A">A</span><span class="mono" style="flex:1">reports/agent-smoke.txt</span><span class="badge ok" style="height:18px">+1</span></div>
+                  <div class="filerow"><span class="fstat M">M</span><span class="mono" style="flex:1">README.md</span><span class="badge warn" style="height:18px">~2</span></div>
+                  <div style="padding:14px 15px;font-size:12px;color:var(--tx-4)">2 files changed · from <span class="mono">git status --porcelain</span> in the sandbox workspace</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ════════ API KEYS ════════ -->
+      <section id="page-keys" class="hidden">
+        <div class="section fade-up">
+          <!-- BYOK first: it's the credential that runs agents -->
+          <div class="sec-head">
+            <div style="display:flex;align-items:center;gap:12px">
+              <h2 class="sec-title">Provider key</h2>
+              <span class="badge acc">Bring your own key</span>
+            </div>
+          </div>
+          <p style="font-size:13px;color:var(--tx-3);margin:-6px 0 14px;max-width:680px">This is the credential that <strong style="color:var(--tx-2)">actually runs your agents</strong>. AgentRouter passes it straight to the runtime in an isolated sandbox and never stores it in plaintext or copies it into general tool env.</p>
+          <div class="provcard">
+            <div class="provlogo" style="background:color-mix(in oklch,var(--ok) 14%,transparent);color:var(--ok)">AI</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:9px"><span style="font-size:14px;font-weight:600">OpenAI</span><span class="badge ok" style="height:19px"><span class="dot ok"></span>connected</span></div>
+              <div class="mono" style="font-size:12px;color:var(--tx-3);margin-top:3px">sk-proj-••••••••••••••••EgGT · powers all Codex runs</div>
+            </div>
+            <button class="btn default sm">Replace</button>
+            <button class="btn danger sm">Disconnect</button>
+          </div>
+          <div class="provcard" style="opacity:.65">
+            <div class="provlogo" style="background:var(--bg-3);color:var(--tx-3)">An</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:9px"><span style="font-size:14px;font-weight:600">Anthropic</span><span class="badge mute" style="height:19px">not connected</span></div>
+              <div style="font-size:12px;color:var(--tx-4);margin-top:3px">Claude Code runtime · coming in Phase 1B</div>
+            </div>
+            <button class="btn default sm" disabled style="opacity:.5">Connect</button>
+          </div>
+
+          <div style="height:34px"></div>
+
+          <!-- AgentRouter keys -->
+          <div class="sec-head">
+            <div style="display:flex;align-items:center;gap:12px">
+              <h2 class="sec-title">AgentRouter API keys</h2>
+              <span class="badge mute">3</span>
+            </div>
+            <button class="btn primary" onclick="openKeyModal()"><svg class="svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>Create key</button>
+          </div>
+          <p style="font-size:13px;color:var(--tx-3);margin:-6px 0 14px;max-width:680px">These authenticate <strong style="color:var(--tx-2)">your app → AgentRouter</strong> (the SDK / REST API). They don't run models — your provider key above does that.</p>
+          <div class="card" style="overflow:hidden">
+            <div class="tablehead"><span>Name</span><span>Secret</span><span>Scopes</span><span>Usage</span><span>Last used</span><span></span></div>
+            <div id="keyRows">
+              <div class="keyrow">
+                <div style="display:flex;align-items:center;gap:10px;min-width:0"><span class="dot info"></span><div><div style="font-size:13px;font-weight:540">prod-backend</div><div style="font-size:10.5px;color:var(--tx-4)">production</div></div></div>
+                <div class="mono" style="font-size:12px;color:var(--tx-3)">ar_live_7Qx<span style="color:var(--tx-4)">••••••</span></div>
+                <div style="display:flex;flex-wrap:wrap;gap:5px"><span class="chip">agents:run</span><span class="chip">runs:read</span></div>
+                <span class="tnum" style="font-size:12.5px;color:var(--tx-2)">1.8M <span style="color:var(--tx-4)">reqs</span></span>
+                <span style="font-size:12px;color:var(--tx-3)">12s ago</span>
+                <div style="display:flex;justify-content:flex-end"><button class="btn ghost sm" style="color:var(--danger)">Revoke</button></div>
+              </div>
+              <div class="keyrow">
+                <div style="display:flex;align-items:center;gap:10px;min-width:0"><span class="dot info"></span><div><div style="font-size:13px;font-weight:540">billing-svc</div><div style="font-size:10.5px;color:var(--tx-4)">production</div></div></div>
+                <div class="mono" style="font-size:12px;color:var(--tx-3)">ar_live_2Mk<span style="color:var(--tx-4)">••••••</span></div>
+                <div style="display:flex;flex-wrap:wrap;gap:5px"><span class="chip">agents:run</span></div>
+                <span class="tnum" style="font-size:12.5px;color:var(--tx-2)">612K <span style="color:var(--tx-4)">reqs</span></span>
+                <span style="font-size:12px;color:var(--tx-3)">4m ago</span>
+                <div style="display:flex;justify-content:flex-end"><button class="btn ghost sm" style="color:var(--danger)">Revoke</button></div>
+              </div>
+              <div class="keyrow">
+                <div style="display:flex;align-items:center;gap:10px;min-width:0"><span class="dot mute"></span><div><div style="font-size:13px;font-weight:540">local-dev</div><div style="font-size:10.5px;color:var(--tx-4)">test</div></div></div>
+                <div class="mono" style="font-size:12px;color:var(--tx-3)">ar_test_Vc0<span style="color:var(--tx-4)">••••••</span></div>
+                <div style="display:flex;flex-wrap:wrap;gap:5px"><span class="chip">agents:run</span><span class="chip">runs:read</span></div>
+                <span class="tnum" style="font-size:12.5px;color:var(--tx-2)">41K <span style="color:var(--tx-4)">reqs</span></span>
+                <span style="font-size:12px;color:var(--tx-3)">2h ago</span>
+                <div style="display:flex;justify-content:flex-end"><button class="btn ghost sm" style="color:var(--danger)">Revoke</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ════════ DOCS ════════ -->
+      <section id="page-docs" class="hidden">
+        <div class="section fade-up">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+            <svg class="svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/></svg>
+            <h2 class="sec-title">Quickstart</h2>
+            <span style="font-size:13px;color:var(--tx-3)">— from zero to a running agent in under a minute</span>
+          </div>
+
+          <div style="display:grid;grid-template-columns:minmax(280px,0.9fr) 1.25fr;gap:24px;margin-top:18px;align-items:start">
+            <div>
+              <div class="qstep first"><span style="position:absolute;left:14px;top:30px;bottom:0;width:1.5px;background:var(--line)"></span><div class="num">1</div><div style="padding-top:3px"><div style="font-size:13.5px;font-weight:580;margin-bottom:3px">Get an AgentRouter key</div><div style="font-size:12.5px;color:var(--tx-3);line-height:1.5;max-width:280px">Scope it to <span class="mono">agents:run</span>. Shown once — store it in a secret manager.</div></div></div>
+              <div class="qstep"><span style="position:absolute;left:14px;top:30px;bottom:0;width:1.5px;background:var(--line)"></span><div class="num">2</div><div style="padding-top:3px"><div style="font-size:13.5px;font-weight:580;margin-bottom:3px">Connect your OpenAI key</div><div style="font-size:12.5px;color:var(--tx-3);line-height:1.5;max-width:280px">Bring your own <span class="mono">sk-…</span> — that's what runs your agents in the sandbox.</div></div></div>
+              <div class="qstep"><span style="position:absolute;left:14px;top:30px;bottom:0;width:1.5px;background:var(--line)"></span><div class="num">3</div><div style="padding-top:3px"><div style="font-size:13.5px;font-weight:580;margin-bottom:3px">Create a run from your code</div><div style="font-size:12.5px;color:var(--tx-3);line-height:1.5;max-width:280px">Pass a task + source, stream every event back.</div></div></div>
+              <div class="qstep" style="padding-bottom:0"><div class="num">4</div><div style="padding-top:3px"><div style="font-size:13.5px;font-weight:580;margin-bottom:3px">Inspect the run</div><div style="font-size:12.5px;color:var(--tx-3);line-height:1.5;max-width:280px">Logs, file changes, and the patch are captured to R2 and replayable.</div></div></div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:16px">
+              <div>
+                <div class="tabbar" id="docTabs" style="margin-bottom:10px">
+                  <button class="tab on" data-doc="node">Node</button>
+                  <button class="tab" data-doc="python">Python</button>
+                  <button class="tab" data-doc="curl">cURL</button>
+                </div>
+                <div class="code">
+                  <div class="code-bar"><span class="mono" style="font-size:11.5px;color:var(--tx-3)" id="docFile">run-agent.ts</span><button class="btn ghost sm" onclick="copyCode()"><svg class="svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9h9v11H9V9zm-3 6H4V4h11v2"/></svg>Copy</button></div>
+                  <pre class="mono" id="docCode"></pre>
+                </div>
+              </div>
+
+              <div class="card" style="padding:16px 18px">
+                <div class="eyebrow" style="margin-bottom:10px">Authentication — two keys</div>
+                <div style="display:flex;flex-direction:column;gap:9px;font-size:13px;color:var(--tx-2)">
+                  <div style="display:flex;gap:9px"><span class="badge acc" style="flex:none">ar_live_…</span><span>Bearer token in <span class="mono">Authorization</span> — authenticates your app to AgentRouter.</span></div>
+                  <div style="display:flex;gap:9px"><span class="badge ok" style="flex:none">sk-…</span><span>Your OpenAI key (BYOK) — connected once in API Keys; runs the model in the sandbox.</span></div>
+                </div>
+              </div>
+
+              <div class="card" style="overflow:hidden">
+                <div style="padding:12px 14px;border-bottom:1px solid var(--line);background:var(--bg-inset)"><div class="eyebrow">REST API · v1</div></div>
+                <div class="endpoint"><span class="method post">POST</span><span class="mono">/v1/runs</span></div>
+                <div class="endpoint"><span class="method get">GET</span><span class="mono">/v1/runs/:id</span></div>
+                <div class="endpoint"><span class="method get">GET</span><span class="mono">/v1/runs/:id/events</span></div>
+                <div class="endpoint"><span class="method get">GET</span><span class="mono">/v1/runs/:id/stream</span></div>
+                <div class="endpoint"><span class="method post">POST</span><span class="mono">/v1/runs/:id/cancel</span></div>
+                <div class="endpoint" style="border-bottom:none"><span class="method get">GET</span><span class="mono">/v1/runs/:id/artifacts</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<!-- create-key modal -->
+<div class="modal-bg hidden" id="keyModal">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--line-soft)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="width:30px;height:30px;border-radius:8px;background:var(--acc-soft);color:var(--acc);display:grid;place-items:center"><svg class="svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a4 4 0 10-3.5 3.97L11 14l2 0 0 2 2 0 0 2 2.5 0 0-2.5L14 12.5A4 4 0 0014 9z"/></svg></div>
+        <h3 id="modalTitle" style="font-size:15px;font-weight:600">Create API key</h3>
+      </div>
+      <button class="iconbtn" onclick="closeKeyModal()"><svg class="svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div id="modalCreate" style="padding:18px">
+      <label style="font-size:12.5px;font-weight:540;color:var(--tx-2);display:block;margin-bottom:7px">Key name</label>
+      <input class="field mono" placeholder="e.g. prod-backend" style="margin-bottom:16px"/>
+      <label style="font-size:12.5px;font-weight:540;color:var(--tx-2);display:block;margin-bottom:7px">Scopes</label>
+      <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px">
+        <span class="chip" style="border-color:var(--acc-line);background:var(--acc-soft);color:var(--acc);padding:5px 9px">✓ agents:run</span>
+        <span class="chip" style="border-color:var(--acc-line);background:var(--acc-soft);color:var(--acc);padding:5px 9px">✓ runs:read</span>
+        <span class="chip" style="padding:5px 9px">approvals:write</span>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn ghost" onclick="closeKeyModal()">Cancel</button>
+        <button class="btn primary" onclick="revealKey()">Create key</button>
+      </div>
+    </div>
+    <div id="modalReveal" class="hidden" style="padding:18px">
+      <div style="display:flex;gap:9px;padding:11px 13px;border-radius:9px;background:color-mix(in oklch,var(--warn) 12%,transparent);border:1px solid color-mix(in oklch,var(--warn) 28%,transparent);margin-bottom:16px">
+        <svg class="svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="1.6" style="margin-top:1px" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zm10 3a3 3 0 100-6 3 3 0 000 6z"/></svg>
+        <span style="font-size:12.5px;color:var(--tx-2);line-height:1.5">This is the only time you'll see the full key. Store it in a secret manager — AgentRouter only keeps the prefix.</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:12px 14px;border-radius:9px;background:var(--bg-inset);border:1px solid var(--line);margin-bottom:18px">
+        <span class="mono" style="flex:1;font-size:13px;color:var(--tx)">ar_live_7QxR2v9KmZ4pXc8Lf3Hn6Td1Ws5Bg0Jy</span>
+        <button class="btn ghost sm">Copy</button>
+      </div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn primary" onclick="closeKeyModal()">Done — I saved it</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── routing ── */
+const titles = { playground:"Playground", keys:"API Keys" };
+function route(r){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('on', n.dataset.route===r));
+  ['playground','keys'].forEach(p=>document.getElementById('page-'+p).classList.toggle('hidden', p!==r));
+  document.getElementById('pageTitle').textContent = titles[r];
+  document.getElementById('pageBadge').style.display = r==='playground' ? 'inline-flex' : 'none';
+  if(r==='playground') startTerm();
+}
+document.getElementById('nav').addEventListener('click', e=>{ const b=e.target.closest('.nav-item'); if(b) route(b.dataset.route); });
+
+/* ── theme ── */
+document.getElementById('themeBtn').addEventListener('click', ()=>{
+  const h=document.documentElement; h.dataset.theme = h.dataset.theme==='dark'?'light':'dark';
+});
+
+/* ── computer tabs ── */
+document.getElementById('compTabs').addEventListener('click', e=>{
+  const b=e.target.closest('.tab'); if(!b)return;
+  document.querySelectorAll('#compTabs .tab').forEach(t=>t.classList.toggle('on', t===b));
+  document.getElementById('termPane').classList.toggle('hidden', b.dataset.tab!=='term');
+  document.getElementById('filesPane').classList.toggle('hidden', b.dataset.tab!=='files');
+});
+
+/* ── streaming terminal ── */
+const TERM_LINES = [
+  {c:'dim', s:'→ POST /v1/runs  ·  runtime: codex · mode: default'},
+  {c:'ok',  s:'✓ run_a91f4c queued → claimed by worker_3f'},
+  {c:'dim', s:'· creating Daytona sandbox (ephemeral, isolated)…'},
+  {c:'ok',  s:'✓ sandbox ar-phase1-test-run_a91f4c ready'},
+  {c:'cmd', s:'$ codex exec --json --sandbox workspace-write --cd /repo'},
+  {c:'step',s:'  model   planning the change'},
+  {c:'step',s:'  tool    shell: mkdir -p reports && printf ... > reports/agent-smoke.txt'},
+  {c:'ok',  s:'  created reports/agent-smoke.txt (1 line)'},
+  {c:'step',s:'  model   summarizing'},
+  {c:'ok',  s:'✓ run.completed  ·  exit 0  ·  3.1s'},
+  {c:'dim', s:'· archived stdout, file-index, changes.patch → R2'},
+];
+let termTimer=null;
+function startTerm(){
+  const pane=document.getElementById('termPane'); if(!pane) return;
+  clearInterval(termTimer); pane.innerHTML=''; let i=0;
+  const status=document.getElementById('runStatus');
+  status.className='badge warn'; status.innerHTML='<span class="dot warn"></span>running…';
+  const cur=document.createElement('span'); cur.className='cursor'; pane.appendChild(cur);
+  termTimer=setInterval(()=>{
+    if(i>=TERM_LINES.length){ clearInterval(termTimer); cur.remove();
+      status.className='badge ok'; status.innerHTML='<span class="dot ok"></span>completed · 3.1s'; return; }
+    const l=TERM_LINES[i++]; const d=document.createElement('div');
+    d.className='ln '+l.c; d.textContent=l.s; pane.insertBefore(d,cur);
+    pane.scrollTop=pane.scrollHeight;
+  }, 360);
+}
+document.getElementById('replayBtn').addEventListener('click', startTerm);
+document.getElementById('runBtn').addEventListener('click', ()=>{
+  const ta=document.getElementById('taskInput'); const v=ta.value.trim();
+  if(v){ const s=document.getElementById('chatScroll');
+    const u=document.createElement('div'); u.className='msg user';
+    u.innerHTML='<div class="who">you</div><div class="bubble"></div>'; u.querySelector('.bubble').textContent=v;
+    s.appendChild(u); s.scrollTop=s.scrollHeight; ta.value='';
+  }
+  document.querySelectorAll('#compTabs .tab').forEach(t=>t.classList.toggle('on', t.dataset.tab==='term'));
+  document.getElementById('termPane').classList.remove('hidden');
+  document.getElementById('filesPane').classList.add('hidden');
+  startTerm();
+});
+
+/* ── modal ── */
+function openKeyModal(){ document.getElementById('keyModal').classList.remove('hidden');
+  document.getElementById('modalCreate').classList.remove('hidden');
+  document.getElementById('modalReveal').classList.add('hidden');
+  document.getElementById('modalTitle').textContent='Create API key'; }
+function closeKeyModal(){ document.getElementById('keyModal').classList.add('hidden'); }
+function revealKey(){ document.getElementById('modalCreate').classList.add('hidden');
+  document.getElementById('modalReveal').classList.remove('hidden');
+  document.getElementById('modalTitle').textContent='Save your API key'; }
+document.getElementById('keyModal').addEventListener('click', e=>{ if(e.target.id==='keyModal') closeKeyModal(); });
+
+/* ── docs code tabs ── */
+const SNIPPETS = {
+  node:{ file:'run-agent.ts', code:
+`import { AgentRouter } from "@agentrouter/sdk";
+
+const ar = new AgentRouter({ apiKey: process.env.AGENTROUTER_KEY });
+
+// Your OpenAI key (BYOK) runs the agent in an isolated sandbox
+const run = await ar.runs.create({
+  task: "Create reports/agent-smoke.txt and summarize the change",
+  runtime: { kind: "codex", mode: "default" },
+  source: { type: "scratch" },
+});
+
+for await (const ev of ar.runs.stream(run.id)) {
+  console.log(ev.type, ev.payload);
+}` },
+  python:{ file:'run_agent.py', code:
+`from agentrouter import AgentRouter
+
+ar = AgentRouter(api_key=os.environ["AGENTROUTER_KEY"])
+
+run = ar.runs.create(
+    task="Create reports/agent-smoke.txt and summarize the change",
+    runtime={"kind": "codex", "mode": "default"},
+    source={"type": "scratch"},
+)
+
+for ev in ar.runs.stream(run.id):
+    print(ev.type, ev.payload)` },
+  curl:{ file:'terminal', code:
+`curl https://api.agentrouter.dev/v1/runs \\
+  -H "Authorization: Bearer $AGENTROUTER_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "task": "Create reports/agent-smoke.txt and summarize the change",
+    "runtime": { "kind": "codex", "mode": "default" },
+    "source": { "type": "scratch" }
+  }'` },
+};
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+const HLTOK=/(\/\/[^\n]*|#[^\n]*)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(import|from|const|let|await|async|for|of|in|return|new|print)\b|(\$[A-Z_]+)/g;
+function highlight(code){
+  let out='', last=0, m; HLTOK.lastIndex=0;
+  while((m=HLTOK.exec(code))){
+    if(m.index>last) out+=escHtml(code.slice(last,m.index));
+    const cls = m[1]?'tok-com':m[2]?'tok-str':m[3]?'tok-kw':'tok-env';
+    out+='<span class="'+cls+'">'+escHtml(m[0])+'</span>';
+    last=m.index+m[0].length;
+  }
+  if(last<code.length) out+=escHtml(code.slice(last));
+  return out;
+}
+function setDoc(k){
+  document.getElementById('docFile').textContent=SNIPPETS[k].file;
+  document.getElementById('docCode').innerHTML=highlight(SNIPPETS[k].code);
+}
+document.getElementById('docTabs').addEventListener('click', e=>{
+  const b=e.target.closest('.tab'); if(!b)return;
+  document.querySelectorAll('#docTabs .tab').forEach(t=>t.classList.toggle('on',t===b));
+  setDoc(b.dataset.doc);
+});
+function copyCode(){ try{ navigator.clipboard.writeText(SNIPPETS[document.querySelector('#docTabs .tab.on').dataset.doc].code);}catch(e){} }
+
+/* init */
+setDoc('node');
+startTerm();
+</script>
+</body>
+</html>

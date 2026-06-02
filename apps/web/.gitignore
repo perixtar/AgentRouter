@@ -1,0 +1,10 @@
+# Next.js
+/.next/
+/out/
+next-env.d.ts.bak
+
+# env
+.env*.local
+
+# misc
+*.tsbuildinfo

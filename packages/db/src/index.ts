@@ -50,6 +50,101 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
   await client.query(`create schema if not exists ${quoteIdent(schema)}`);
 
   await withSearchPath(client, schema, async () => {
+    // ── Tenancy (M1): orgs, profiles, api_keys ──
+    await client.query(`
+      create table if not exists orgs (
+        id uuid primary key default gen_random_uuid(),
+        name text not null,
+        created_at timestamptz not null default now()
+      )
+    `);
+
+    await client.query(`
+      create table if not exists profiles (
+        user_id uuid primary key,
+        org_id uuid not null references orgs(id),
+        email text not null,
+        created_at timestamptz not null default now()
+      )
+    `);
+
+    await client.query(`
+      create table if not exists api_keys (
+        id uuid primary key default gen_random_uuid(),
+        org_id uuid not null references orgs(id),
+        name text not null,
+        prefix text not null,
+        key_hash text not null unique,
+        scopes text[] not null default '{}',
+        last_used_at timestamptz,
+        revoked_at timestamptz,
+        created_at timestamptz not null default now()
+      )
+    `);
+
+    await client.query(
+      "create index if not exists profiles_org_id_idx on profiles(org_id)"
+    );
+    await client.query(
+      "create index if not exists api_keys_org_id_idx on api_keys(org_id)"
+    );
+
+    // ── BYOK (M3): provider_keys — encrypted at rest (AES-256-GCM). ──
+    await client.query(`
+      create table if not exists provider_keys (
+        id uuid primary key default gen_random_uuid(),
+        org_id uuid not null references orgs(id),
+        provider text not null,
+        key_ciphertext bytea not null,
+        key_iv bytea not null,
+        key_tag bytea not null,
+        key_last4 text not null,
+        master_key_version integer not null default 1,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        unique (org_id, provider)
+      )
+    `);
+
+    // ── Multi-turn (M4): sessions own a persistent sandbox; turns map a user
+    //    message → a run. ──
+    await client.query(`
+      create table if not exists sessions (
+        id text primary key,
+        org_id text not null,
+        runtime_kind text not null default 'codex',
+        runtime_mode text not null default 'full_access',
+        runtime_model text,
+        title text,
+        sandbox_id text,
+        sandbox_state text not null default 'none'
+          check (sandbox_state in ('none', 'creating', 'running', 'suspended', 'deleted')),
+        codex_session_id text,
+        turn_count integer not null default 0,
+        status text not null default 'active'
+          check (status in ('active', 'closed')),
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        last_active_at timestamptz not null default now()
+      )
+    `);
+
+    await client.query(`
+      create table if not exists turns (
+        id text primary key,
+        session_id text not null references sessions(id),
+        org_id text not null,
+        run_id text not null,
+        turn_number integer not null,
+        prompt text not null,
+        created_at timestamptz not null default now(),
+        unique (session_id, turn_number)
+      )
+    `);
+
+    await client.query("create index if not exists sessions_org_id_idx on sessions(org_id)");
+    await client.query("create index if not exists turns_session_id_idx on turns(session_id)");
+
     await client.query(`
       create table if not exists runs (
         id text primary key,
@@ -217,6 +312,12 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
     await client.query("create index if not exists artifacts_run_id_idx on artifacts(run_id)");
     await client.query("alter table runs add column if not exists runtime_model text");
     await client.query("alter table run_attempts add column if not exists runtime_model text");
+    // ── M2: tenant scoping on runtime tables (additive, nullable) ──
+    await client.query("alter table runs add column if not exists org_id text");
+    await client.query("alter table run_attempts add column if not exists org_id text");
+    await client.query("create index if not exists runs_org_id_idx on runs(org_id)");
+    // ── M4: a run may belong to a multi-turn session (null = one-shot). ──
+    await client.query("alter table runs add column if not exists session_id text");
     await client.query("alter table runs drop constraint if exists runs_runtime_mode_check");
     await client.query("alter table runs drop constraint if exists runs_check");
     await client.query(
@@ -264,6 +365,8 @@ async function addRuntimeModeConstraint(
 
 export interface CreateRunInput {
   id: string;
+  orgId: string;
+  sessionId?: string;
   runtimeKind: RuntimeKind;
   runtimeMode: RuntimePermissionValue;
   runtimeModel?: RuntimeModel;
@@ -273,6 +376,8 @@ export interface CreateRunInput {
 
 export interface RunRecord {
   id: string;
+  orgId?: string;
+  sessionId?: string;
   runtimeKind: RuntimeKind;
   runtimeMode: RuntimePermissionValue;
   runtimeModel?: RuntimeModel;
@@ -363,6 +468,7 @@ export interface RecordArtifactInput {
 export interface RunAttemptInput {
   id: string;
   runId: string;
+  orgId?: string;
   attemptNumber: number;
   workerId: string;
   runtimeKind: RuntimeKind;
@@ -380,12 +486,14 @@ export class RunRepository {
   async createRun(input: CreateRunInput): Promise<RunRecord> {
     const result = await this.client.query(
       `
-        insert into runs (id, runtime_kind, runtime_mode, runtime_model, input_json, prompt_summary)
-        values ($1, $2, $3, $4, $5::jsonb, $6)
+        insert into runs (id, org_id, session_id, runtime_kind, runtime_mode, runtime_model, input_json, prompt_summary)
+        values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
         returning *
       `,
       [
         input.id,
+        input.orgId,
+        input.sessionId,
         input.runtimeKind,
         input.runtimeMode,
         input.runtimeModel,
@@ -397,32 +505,36 @@ export class RunRepository {
     return mapRun(result.rows[0]);
   }
 
-  async getRun(runId: string): Promise<RunRecord | undefined> {
+  // Tenant-isolation chokepoint: every run read is scoped to `orgId`. A run
+  // belonging to another org is invisible (returns undefined) — never throws a
+  // cross-tenant signal.
+  async getRun(runId: string, orgId: string): Promise<RunRecord | undefined> {
     const result = await this.client.query(
       `
         select *
         from runs
-        where id = $1
+        where id = $1 and org_id = $2
       `,
-      [runId]
+      [runId, orgId]
     );
 
     return result.rows[0] ? mapRun(result.rows[0]) : undefined;
   }
 
   async listRuns(input: {
+    orgId: string;
     status?: "active" | RunStatus;
     limit?: number;
-  } = {}): Promise<RunRecord[]> {
+  }): Promise<RunRecord[]> {
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
-    const params: unknown[] = [limit];
-    let where = "";
+    const params: unknown[] = [limit, input.orgId];
+    let where = "where org_id = $2";
 
     if (input.status === "active") {
-      where = "where status in ('queued', 'starting', 'running', 'cancelling')";
+      where += " and status in ('queued', 'starting', 'running', 'cancelling')";
     } else if (input.status) {
       params.push(input.status);
-      where = "where status = $2";
+      where += " and status = $3";
     }
 
     const result = await this.client.query(
@@ -439,12 +551,62 @@ export class RunRepository {
     return result.rows.map(mapRun);
   }
 
+  // ── Trusted internal reads (worker only) ──
+  // The worker operates on a run it has already claimed, so it does not assert
+  // an org. These bypass the org filter intentionally and must NEVER be wired
+  // to an API request path — the API uses the org-scoped variants above as the
+  // tenant-isolation chokepoint.
+  async getRunInternal(runId: string): Promise<RunRecord | undefined> {
+    return this.getRunUnscoped(runId);
+  }
+
+  async listEventsInternal(input: {
+    runId: string;
+    afterSeq?: bigint;
+    limit?: number;
+  }): Promise<EventRecord[]> {
+    const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
+    const afterSeq = input.afterSeq ?? 0n;
+    const result = await this.client.query(
+      `
+        select *
+        from run_events
+        where run_id = $1 and sequence > $2
+        order by sequence asc
+        limit $3
+      `,
+      [input.runId, afterSeq.toString(), limit]
+    );
+    return result.rows.map(mapEvent);
+  }
+
+  async listArtifactsInternal(runId: string): Promise<ArtifactRecord[]> {
+    const result = await this.client.query(
+      `
+        select *
+        from artifacts
+        where run_id = $1 and deleted_at is null
+        order by created_at asc
+      `,
+      [runId]
+    );
+    return result.rows.map(mapArtifact);
+  }
+
+  private async getRunUnscoped(runId: string): Promise<RunRecord | undefined> {
+    const result = await this.client.query(
+      `select * from runs where id = $1`,
+      [runId]
+    );
+    return result.rows[0] ? mapRun(result.rows[0]) : undefined;
+  }
+
   async updateRunStatus(
     runId: string,
     nextStatus: RunStatus,
     failure?: { code: string; reason: string }
   ): Promise<RunRecord> {
-    const current = await this.getRun(runId);
+    const current = await this.getRunUnscoped(runId);
     if (!current) {
       throw new Error(`Run not found: ${runId}`);
     }
@@ -472,10 +634,11 @@ export class RunRepository {
     return mapRun(result.rows[0]);
   }
 
-  async cancelRun(runId: string): Promise<RunRecord> {
-    const current = await this.getRun(runId);
+  async cancelRun(runId: string, orgId: string): Promise<RunRecord | undefined> {
+    const current = await this.getRun(runId, orgId);
     if (!current) {
-      throw new Error(`Run not found: ${runId}`);
+      // Run not found for this org — caller maps to 404.
+      return undefined;
     }
 
     if (["completed", "failed", "cancelled"].includes(current.status)) {
@@ -486,13 +649,13 @@ export class RunRepository {
       `
         update runs
         set status = 'cancelling', cancel_requested_at = coalesce(cancel_requested_at, now())
-        where id = $1
+        where id = $1 and org_id = $2
         returning *
       `,
-      [runId]
+      [runId, orgId]
     );
 
-    return mapRun(result.rows[0]);
+    return result.rows[0] ? mapRun(result.rows[0]) : undefined;
   }
 
   async claimNextRun(workerId: string): Promise<RunRecord | undefined> {
@@ -534,14 +697,15 @@ export class RunRepository {
     await this.client.query(
       `
         insert into run_attempts (
-          id, run_id, attempt_number, worker_id, runtime_kind, runtime_mode, runtime_model,
+          id, run_id, org_id, attempt_number, worker_id, runtime_kind, runtime_mode, runtime_model,
           permission_profile_json, credential_strategy, cli_version, provider_session_json
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb)
       `,
       [
         input.id,
         input.runId,
+        input.orgId,
         input.attemptNumber,
         input.workerId,
         input.runtimeKind,
@@ -637,20 +801,23 @@ export class RunRepository {
 
   async listEvents(input: {
     runId: string;
+    orgId: string;
     afterSeq?: bigint;
     limit?: number;
   }): Promise<EventRecord[]> {
     const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
     const afterSeq = input.afterSeq ?? 0n;
+    // Tenant-scoped: only events for a run owned by `orgId`.
     const result = await this.client.query(
       `
-        select *
-        from run_events
-        where run_id = $1 and sequence > $2
-        order by sequence asc
-        limit $3
+        select e.*
+        from run_events e
+        join runs r on r.id = e.run_id
+        where e.run_id = $1 and r.org_id = $2 and e.sequence > $3
+        order by e.sequence asc
+        limit $4
       `,
-      [input.runId, afterSeq.toString(), limit]
+      [input.runId, input.orgId, afterSeq.toString(), limit]
     );
 
     return result.rows.map(mapEvent);
@@ -682,37 +849,456 @@ export class RunRepository {
     return mapArtifact(result.rows[0]);
   }
 
-  async listArtifacts(runId: string): Promise<ArtifactRecord[]> {
+  async listArtifacts(runId: string, orgId: string): Promise<ArtifactRecord[]> {
     const result = await this.client.query(
       `
-        select *
-        from artifacts
-        where run_id = $1 and deleted_at is null
-        order by created_at asc
+        select a.*
+        from artifacts a
+        join runs r on r.id = a.run_id
+        where a.run_id = $1 and r.org_id = $2 and a.deleted_at is null
+        order by a.created_at asc
       `,
-      [runId]
+      [runId, orgId]
     );
 
     return result.rows.map(mapArtifact);
   }
 
-  async getArtifact(runId: string, artifactId: string): Promise<ArtifactRecord | undefined> {
+  async getArtifact(
+    runId: string,
+    artifactId: string,
+    orgId: string
+  ): Promise<ArtifactRecord | undefined> {
     const result = await this.client.query(
       `
-        select *
-        from artifacts
-        where run_id = $1 and id = $2 and deleted_at is null
+        select a.*
+        from artifacts a
+        join runs r on r.id = a.run_id
+        where a.run_id = $1 and a.id = $2 and r.org_id = $3 and a.deleted_at is null
       `,
-      [runId, artifactId]
+      [runId, artifactId, orgId]
     );
 
     return result.rows[0] ? mapArtifact(result.rows[0]) : undefined;
   }
+
+  // ── BYOK provider keys (M3) ──
+  // Plaintext never touches these methods — only encrypted material in, and
+  // (for the worker) encrypted material out to be decrypted with the master key.
+
+  async upsertProviderKey(input: {
+    orgId: string;
+    provider: string;
+    ciphertext: Buffer;
+    iv: Buffer;
+    tag: Buffer;
+    last4: string;
+    keyVersion: number;
+  }): Promise<void> {
+    await this.client.query(
+      `
+        insert into provider_keys
+          (org_id, provider, key_ciphertext, key_iv, key_tag, key_last4, master_key_version)
+        values ($1, $2, $3, $4, $5, $6, $7)
+        on conflict (org_id, provider) do update set
+          key_ciphertext = excluded.key_ciphertext,
+          key_iv = excluded.key_iv,
+          key_tag = excluded.key_tag,
+          key_last4 = excluded.key_last4,
+          master_key_version = excluded.master_key_version,
+          updated_at = now()
+      `,
+      [
+        input.orgId,
+        input.provider,
+        input.ciphertext,
+        input.iv,
+        input.tag,
+        input.last4,
+        input.keyVersion
+      ]
+    );
+  }
+
+  /** Returns the encrypted row for the worker to decrypt, or undefined. */
+  async getProviderKey(
+    orgId: string,
+    provider: string
+  ): Promise<ProviderKeyRecord | undefined> {
+    const result = await this.client.query(
+      `
+        select org_id, provider, key_ciphertext, key_iv, key_tag, key_last4, master_key_version
+        from provider_keys
+        where org_id = $1 and provider = $2
+      `,
+      [orgId, provider]
+    );
+    return result.rows[0] ? mapProviderKey(result.rows[0]) : undefined;
+  }
+
+  /** Connection status for the UI — last4 only, never the secret. */
+  async getProviderKeyStatus(orgId: string): Promise<ProviderKeyStatus[]> {
+    const result = await this.client.query(
+      `
+        select provider, key_last4, updated_at
+        from provider_keys
+        where org_id = $1
+        order by provider asc
+      `,
+      [orgId]
+    );
+    return result.rows.map((row) => ({
+      provider: String(row.provider),
+      last4: String(row.key_last4),
+      updatedAt: row.updated_at as Date
+    }));
+  }
+
+  async deleteProviderKey(orgId: string, provider: string): Promise<boolean> {
+    const result = await this.client.query(
+      `delete from provider_keys where org_id = $1 and provider = $2`,
+      [orgId, provider]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  // ── AgentRouter API keys (M3) ──
+  // The web server can manage these directly (no master key needed — only a
+  // sha256 hash is stored).
+
+  async createApiKey(input: {
+    orgId: string;
+    name: string;
+    prefix: string;
+    keyHash: string;
+    scopes: string[];
+  }): Promise<ApiKeyRecord> {
+    const result = await this.client.query(
+      `
+        insert into api_keys (org_id, name, prefix, key_hash, scopes)
+        values ($1, $2, $3, $4, $5)
+        returning id, name, prefix, scopes, last_used_at, revoked_at, created_at
+      `,
+      [input.orgId, input.name, input.prefix, input.keyHash, input.scopes]
+    );
+    return mapApiKey(result.rows[0]);
+  }
+
+  async listApiKeys(orgId: string): Promise<ApiKeyRecord[]> {
+    const result = await this.client.query(
+      `
+        select id, name, prefix, scopes, last_used_at, revoked_at, created_at
+        from api_keys
+        where org_id = $1
+        order by created_at desc
+      `,
+      [orgId]
+    );
+    return result.rows.map(mapApiKey);
+  }
+
+  /** Soft-revoke (sets revoked_at). Org-scoped. Returns false if not found. */
+  async revokeApiKey(orgId: string, id: string): Promise<boolean> {
+    const result = await this.client.query(
+      `
+        update api_keys
+        set revoked_at = now()
+        where id = $1 and org_id = $2 and revoked_at is null
+      `,
+      [id, orgId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  // ── Multi-turn sessions (M4) — all org-scoped. ──
+
+  async createSession(input: {
+    id: string;
+    orgId: string;
+    runtimeKind: RuntimeKind;
+    runtimeMode: RuntimePermissionValue;
+    runtimeModel?: RuntimeModel;
+    title?: string;
+  }): Promise<SessionRecord> {
+    const result = await this.client.query(
+      `
+        insert into sessions (id, org_id, runtime_kind, runtime_mode, runtime_model, title)
+        values ($1, $2, $3, $4, $5, $6)
+        returning *
+      `,
+      [
+        input.id,
+        input.orgId,
+        input.runtimeKind,
+        input.runtimeMode,
+        input.runtimeModel,
+        input.title
+      ]
+    );
+    return mapSession(result.rows[0]);
+  }
+
+  async getSession(sessionId: string, orgId: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query(
+      `select * from sessions where id = $1 and org_id = $2`,
+      [sessionId, orgId]
+    );
+    return result.rows[0] ? mapSession(result.rows[0]) : undefined;
+  }
+
+  /** Trusted internal read (worker) — not org-scoped. */
+  async getSessionInternal(sessionId: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query(`select * from sessions where id = $1`, [sessionId]);
+    return result.rows[0] ? mapSession(result.rows[0]) : undefined;
+  }
+
+  async listSessions(orgId: string, limit = 50): Promise<SessionRecord[]> {
+    const result = await this.client.query(
+      `select * from sessions where org_id = $1 order by last_active_at desc limit $2`,
+      [orgId, Math.min(Math.max(limit, 1), 100)]
+    );
+    return result.rows.map(mapSession);
+  }
+
+  /**
+   * Atomically claims a session for a new turn iff it has no in-flight turn.
+   * Returns the session when claimed, or undefined when busy/closed/missing.
+   * Concurrency guard: a 2nd in-flight turn for the same session is rejected.
+   */
+  async beginSessionTurn(sessionId: string, orgId: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query(
+      `
+        update sessions
+        set sandbox_state = case when sandbox_state = 'none' then 'creating' else sandbox_state end,
+            last_active_at = now(),
+            updated_at = now()
+        where id = $1 and org_id = $2 and status = 'active'
+          and not exists (
+            select 1 from runs r
+            where r.session_id = sessions.id
+              and r.status in ('queued', 'starting', 'running', 'cancelling')
+          )
+        returning *
+      `,
+      [sessionId, orgId]
+    );
+    return result.rows[0] ? mapSession(result.rows[0]) : undefined;
+  }
+
+  async updateSessionSandbox(input: {
+    sessionId: string;
+    sandboxId?: string | null;
+    sandboxState?: SessionRecord["sandboxState"];
+    codexSessionId?: string | null;
+  }): Promise<void> {
+    await this.client.query(
+      `
+        update sessions
+        set sandbox_id = coalesce($2, sandbox_id),
+            sandbox_state = coalesce($3, sandbox_state),
+            codex_session_id = coalesce($4, codex_session_id),
+            updated_at = now(),
+            last_active_at = now()
+        where id = $1
+      `,
+      [input.sessionId, input.sandboxId ?? null, input.sandboxState ?? null, input.codexSessionId ?? null]
+    );
+  }
+
+  async incrementSessionTurnCount(sessionId: string): Promise<void> {
+    await this.client.query(
+      `update sessions set turn_count = turn_count + 1, updated_at = now() where id = $1`,
+      [sessionId]
+    );
+  }
+
+  /** Sets the display turn counter to an absolute value (number of turns started). */
+  async setSessionTurnCount(sessionId: string, count: number): Promise<void> {
+    await this.client.query(
+      `update sessions set turn_count = $2, updated_at = now() where id = $1`,
+      [sessionId, count]
+    );
+  }
+
+  /**
+   * Resets a session to a clean pre-sandbox state (sandbox_id null,
+   * sandbox_state 'none') after a turn fails before any sandbox is created —
+   * only when no persistent sandbox exists yet, so the next message starts
+   * fresh. Never downgrades a session that already owns a sandbox.
+   */
+  async resetSessionSandbox(sessionId: string): Promise<void> {
+    await this.client.query(
+      `update sessions
+          set sandbox_id = null, sandbox_state = 'none', updated_at = now()
+        where id = $1 and sandbox_id is null`,
+      [sessionId]
+    );
+  }
+
+  async closeSession(sessionId: string, orgId: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query(
+      `update sessions set status = 'closed', updated_at = now()
+         where id = $1 and org_id = $2 returning *`,
+      [sessionId, orgId]
+    );
+    return result.rows[0] ? mapSession(result.rows[0]) : undefined;
+  }
+
+  /**
+   * Next turn number = max(turn_number)+1 for the session, derived from the
+   * actual turns rows (NOT the display `turn_count`, which a failed turn can
+   * leave stale). Must be called inside the same transaction as createTurn so
+   * the value is consistent under concurrency.
+   */
+  async nextTurnNumber(sessionId: string): Promise<number> {
+    const result = await this.client.query<{ next: number }>(
+      `select coalesce(max(turn_number), 0) + 1 as next from turns where session_id = $1`,
+      [sessionId]
+    );
+    return Number(result.rows[0]?.next ?? 1);
+  }
+
+  async createTurn(input: {
+    id: string;
+    sessionId: string;
+    orgId: string;
+    runId: string;
+    turnNumber: number;
+    prompt: string;
+  }): Promise<TurnRecord> {
+    const result = await this.client.query(
+      `
+        insert into turns (id, session_id, org_id, run_id, turn_number, prompt)
+        values ($1, $2, $3, $4, $5, $6)
+        returning *
+      `,
+      [input.id, input.sessionId, input.orgId, input.runId, input.turnNumber, input.prompt]
+    );
+    return mapTurn(result.rows[0]);
+  }
+
+  async listTurns(sessionId: string, orgId: string): Promise<TurnRecord[]> {
+    const result = await this.client.query(
+      `select * from turns where session_id = $1 and org_id = $2 order by turn_number asc`,
+      [sessionId, orgId]
+    );
+    return result.rows.map(mapTurn);
+  }
+}
+
+export interface SessionRecord {
+  id: string;
+  orgId: string;
+  runtimeKind: RuntimeKind;
+  runtimeMode: RuntimePermissionValue;
+  runtimeModel?: RuntimeModel;
+  title?: string;
+  sandboxId?: string;
+  sandboxState: "none" | "creating" | "running" | "suspended" | "deleted";
+  codexSessionId?: string;
+  turnCount: number;
+  status: "active" | "closed";
+  createdAt: Date;
+  updatedAt: Date;
+  lastActiveAt: Date;
+}
+
+export interface TurnRecord {
+  id: string;
+  sessionId: string;
+  orgId: string;
+  runId: string;
+  turnNumber: number;
+  prompt: string;
+  createdAt: Date;
+}
+
+function mapSession(row: Record<string, unknown>): SessionRecord {
+  return {
+    id: String(row.id),
+    orgId: String(row.org_id),
+    runtimeKind: row.runtime_kind as RuntimeKind,
+    runtimeMode: row.runtime_mode as RuntimePermissionValue,
+    runtimeModel: optionalString(row.runtime_model),
+    title: optionalString(row.title),
+    sandboxId: optionalString(row.sandbox_id),
+    sandboxState: String(row.sandbox_state) as SessionRecord["sandboxState"],
+    codexSessionId: optionalString(row.codex_session_id),
+    turnCount: Number(row.turn_count),
+    status: String(row.status) as SessionRecord["status"],
+    createdAt: row.created_at as Date,
+    updatedAt: row.updated_at as Date,
+    lastActiveAt: row.last_active_at as Date
+  };
+}
+
+function mapTurn(row: Record<string, unknown>): TurnRecord {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    orgId: String(row.org_id),
+    runId: String(row.run_id),
+    turnNumber: Number(row.turn_number),
+    prompt: String(row.prompt),
+    createdAt: row.created_at as Date
+  };
+}
+
+export interface ProviderKeyRecord {
+  orgId: string;
+  provider: string;
+  ciphertext: Buffer;
+  iv: Buffer;
+  tag: Buffer;
+  last4: string;
+  keyVersion: number;
+}
+
+export interface ProviderKeyStatus {
+  provider: string;
+  last4: string;
+  updatedAt: Date;
+}
+
+export interface ApiKeyRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  lastUsedAt?: Date;
+  revokedAt?: Date;
+  createdAt: Date;
+}
+
+function mapProviderKey(row: Record<string, unknown>): ProviderKeyRecord {
+  return {
+    orgId: String(row.org_id),
+    provider: String(row.provider),
+    ciphertext: row.key_ciphertext as Buffer,
+    iv: row.key_iv as Buffer,
+    tag: row.key_tag as Buffer,
+    last4: String(row.key_last4),
+    keyVersion: Number(row.master_key_version)
+  };
+}
+
+function mapApiKey(row: Record<string, unknown>): ApiKeyRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    prefix: String(row.prefix),
+    scopes: Array.isArray(row.scopes) ? (row.scopes as string[]) : [],
+    lastUsedAt: optionalDate(row.last_used_at),
+    revokedAt: optionalDate(row.revoked_at),
+    createdAt: row.created_at as Date
+  };
 }
 
 function mapRun(row: Record<string, unknown>): RunRecord {
   return {
     id: String(row.id),
+    orgId: optionalString(row.org_id),
+    sessionId: optionalString(row.session_id),
     runtimeKind: row.runtime_kind as RuntimeKind,
     runtimeMode: row.runtime_mode as RuntimePermissionValue,
     runtimeModel: optionalString(row.runtime_model),

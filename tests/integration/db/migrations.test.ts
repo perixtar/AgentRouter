@@ -62,6 +62,7 @@ describe("Phase 1 Postgres migrations", () => {
         const repo = new RunRepository(client);
         const run = await repo.createRun({
           id: `run_${randomUUID()}`,
+          orgId: "org_test",
           runtimeKind: "codex",
           runtimeMode: "default",
           runtimeModel: "gpt-4o",
@@ -75,6 +76,7 @@ describe("Phase 1 Postgres migrations", () => {
         await expect(
           repo.createRun({
             id: `run_${randomUUID()}`,
+            orgId: "org_test",
             runtimeKind: "claude_code",
             runtimeMode: "acceptEdits",
             runtimeModel: "claude-sonnet-4-6",
@@ -90,6 +92,7 @@ describe("Phase 1 Postgres migrations", () => {
         await expect(
           repo.createRun({
             id: `run_${randomUUID()}`,
+            orgId: "org_test",
             runtimeKind: "claude_code",
             runtimeMode: "full_access",
             input: { task: "invalid" },

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentRouter — Playground Plan</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --bg:oklch(0.165 0.006 256); --bg-1:oklch(0.195 0.007 256); --bg-2:oklch(0.225 0.008 256);
+  --bg-inset:oklch(0.145 0.006 256); --line:oklch(0.30 0.009 256); --line-soft:oklch(0.255 0.008 256);
+  --tx:oklch(0.96 0.004 256); --tx-2:oklch(0.74 0.008 256); --tx-3:oklch(0.56 0.009 256); --tx-4:oklch(0.44 0.009 256);
+  --acc:oklch(0.80 0.155 152); --acc-soft:oklch(0.80 0.155 152/.12); --acc-line:oklch(0.80 0.155 152/.32);
+  --warn:oklch(0.82 0.15 80);
+}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:"Geist",system-ui,sans-serif;
+  font-size:14.5px;line-height:1.6;letter-spacing:-0.005em;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:920px;margin:0 auto;padding:48px 28px 120px;}
+h1{font-size:27px;font-weight:680;letter-spacing:-.025em;margin:0 0 6px;}
+h2{font-size:19px;font-weight:620;letter-spacing:-.02em;margin:42px 0 12px;padding-top:18px;border-top:1px solid var(--line-soft);}
+h3{font-size:15.5px;font-weight:600;margin:24px 0 8px;color:var(--tx);}
+p{color:var(--tx-2);margin:10px 0;}
+a{color:var(--acc);text-decoration:none;}
+strong{color:var(--tx);font-weight:600;}
+hr{border:none;border-top:1px solid var(--line-soft);margin:34px 0;}
+code{font-family:"Geist Mono",ui-monospace,monospace;font-size:12.5px;background:var(--bg-inset);
+  border:1px solid var(--line-soft);border-radius:5px;padding:1px 5px;color:var(--acc);}
+blockquote{margin:14px 0;padding:10px 16px;border-left:3px solid var(--acc-line);background:var(--acc-soft);
+  border-radius:0 8px 8px 0;color:var(--tx-2);}
+blockquote strong{color:var(--acc);}
+ul,ol{color:var(--tx-2);padding-left:22px;} li{margin:5px 0;}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px;}
+th,td{border:1px solid var(--line-soft);padding:8px 12px;text-align:left;vertical-align:top;}
+th{background:var(--bg-inset);color:var(--tx-4);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;}
+td{color:var(--tx-2);}
+td code{font-size:12px;}
+.mermaid{background:var(--bg-1);border:1px solid var(--line-soft);border-radius:12px;padding:20px;margin:18px 0;text-align:center;overflow-x:auto;}
+.toolbar{position:sticky;top:0;background:color-mix(in oklch,var(--bg) 88%,transparent);backdrop-filter:blur(10px);
+  margin:-48px -28px 24px;padding:14px 28px;border-bottom:1px solid var(--line-soft);display:flex;gap:10px;align-items:center;z-index:5;}
+.toolbar .t{font-size:12px;color:var(--tx-4);font-weight:600;letter-spacing:.05em;text-transform:uppercase;flex:1;}
+.btn{font-size:12.5px;font-weight:540;padding:6px 12px;border-radius:7px;border:1px solid var(--line);
+  background:var(--bg-2);color:var(--tx);cursor:pointer;}
+.btn.acc{background:var(--acc);color:#06140c;border-color:transparent;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="toolbar">
+    <span class="t">AgentRouter · design</span>
+    <a class="btn" href="playground-plan.md">View .md source</a>
+    <a class="btn acc" href="playground.html">Open clickable mockup →</a>
+  </div>
+  <div id="content">Loading…</div>
+</div>
+
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+import { marked } from "https://cdn.jsdelivr.net/npm/marked@13/lib/marked.esm.js";
+
+const md = await (await fetch("playground-plan.md")).text();
+const el = document.getElementById("content");
+el.innerHTML = marked.parse(md);
+
+// turn ```mermaid code blocks into <div class="mermaid"> for rendering
+el.querySelectorAll("code.language-mermaid").forEach((code) => {
+  const div = document.createElement("div");
+  div.className = "mermaid";
+  div.textContent = code.textContent;
+  code.closest("pre").replaceWith(div);
+});
+
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "dark",
+  themeVariables: {
+    background: "#1a1d22", primaryColor: "#222730", primaryTextColor: "#e9edf2",
+    primaryBorderColor: "#3a4150", lineColor: "#6b7686", fontFamily: "Geist Mono, monospace",
+    fontSize: "13px"
+  }
+});
+await mermaid.run({ querySelector: ".mermaid" });
+</script>
+</body>
+</html>

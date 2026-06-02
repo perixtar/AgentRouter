@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export interface AgentRouterConfig {
   apiKey: string;
+  webServiceToken?: string;
+  masterKey?: string;
   daytonaApiKey: string;
   codexApiKey?: string;
   anthropicApiKey?: string;
@@ -23,6 +25,14 @@ export interface AgentRouterConfig {
 
 const envSchema = z.object({
   AGENTROUTER_API_KEY: z.string().min(1),
+  // Shared web→API service token (web server holds it; Fastify trusts the
+  // asserted X-AR-Org-Id when the bearer matches it). Optional so worker/tests
+  // that don't serve the web path still boot.
+  AGENTROUTER_WEB_SERVICE_TOKEN: z.string().min(1).optional(),
+  // Master key for BYOK envelope encryption (AES-256-GCM, 32-byte base64).
+  // Lives on Fly (API + worker) ONLY — never on Vercel. Optional so other
+  // tooling boots; BYOK endpoints/worker assert it when actually used.
+  AGENTROUTER_MASTER_KEY: z.string().min(1).optional(),
   DAYTONA_API_KEY: z.string().min(1),
   CODEX_API_KEY: z.string().min(1).optional(),
   OPENAI_API_KEY: z.string().min(1).optional(),
@@ -48,6 +58,8 @@ export function parseAgentRouterEnv(input: NodeJS.ProcessEnv): AgentRouterConfig
 
   return {
     apiKey: parsed.AGENTROUTER_API_KEY,
+    webServiceToken: parsed.AGENTROUTER_WEB_SERVICE_TOKEN,
+    masterKey: parsed.AGENTROUTER_MASTER_KEY,
     daytonaApiKey: parsed.DAYTONA_API_KEY,
     codexApiKey,
     anthropicApiKey: parsed.ANTHROPIC_API_KEY,

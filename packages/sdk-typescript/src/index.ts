@@ -124,6 +124,48 @@ export interface ClaudeCodeRuntimeOptions {
   model?: string;
 }
 
+// ── Multi-turn sessions (M4) ──
+
+export interface Session {
+  id: string;
+  runtime: ResolvedRuntimeSelection;
+  title?: string;
+  status: "active" | "closed";
+  sandboxState: "none" | "creating" | "running" | "suspended" | "deleted";
+  turnCount: number;
+  createdAt: string;
+  lastActiveAt: string;
+}
+
+export interface SessionTurn {
+  id: string;
+  runId: string;
+  turnNumber: number;
+  prompt: string;
+  createdAt: string;
+}
+
+export interface CreateSessionRequest {
+  runtime?: CodexRuntimeSelection;
+  title?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SendMessageResult {
+  runId: string;
+  turnNumber: number;
+  sessionId: string;
+}
+
+export interface SessionEventsResult {
+  sessionId: string;
+  runId?: string;
+  status?: Run["status"];
+  failure?: { code?: string; reason?: string };
+  items: RunEvent[];
+  nextAfterSeq: number;
+}
+
 export interface AgentRouterClient {
   createRun(input: CreateRunRequest): Promise<Run>;
   listRuns(query?: { status?: string; limit?: number }): Promise<{ items: Run[] }>;
@@ -138,6 +180,16 @@ export interface AgentRouterClient {
   downloadArtifact(runId: string, artifactId: string): Promise<ArrayBuffer>;
   streamRun(runId: string, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
   createRunAndWait(input: CreateAndWaitRequest): Promise<RunSession>;
+  // ── sessions (M4) ──
+  createSession(input?: CreateSessionRequest): Promise<Session>;
+  getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }>;
+  sendMessage(sessionId: string, message: string): Promise<SendMessageResult>;
+  listSessionEvents(
+    sessionId: string,
+    query?: { runId?: string; afterSeq?: number }
+  ): Promise<SessionEventsResult>;
+  streamSession(sessionId: string, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
+  closeSession(sessionId: string): Promise<Session>;
 }
 
 export interface RunAgentCreateRequest extends CreateAndWaitRequest {
@@ -272,6 +324,34 @@ class AgentRouterClientImpl implements AgentRouterClient {
   async createRunAndWait(input: CreateAndWaitRequest): Promise<RunSession> {
     return this.http.createAndWait(input);
   }
+
+  // ── sessions (M4) ──
+  async createSession(input: CreateSessionRequest = {}): Promise<Session> {
+    return this.http.createSession(input);
+  }
+
+  async getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }> {
+    return this.http.getSession(sessionId);
+  }
+
+  async sendMessage(sessionId: string, message: string): Promise<SendMessageResult> {
+    return this.http.sendMessage(sessionId, message);
+  }
+
+  async listSessionEvents(
+    sessionId: string,
+    query: { runId?: string; afterSeq?: number } = {}
+  ): Promise<SessionEventsResult> {
+    return this.http.sessionEvents(sessionId, query);
+  }
+
+  streamSession(sessionId: string, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
+    return this.http.streamSession(sessionId, options);
+  }
+
+  async closeSession(sessionId: string): Promise<Session> {
+    return this.http.closeSession(sessionId);
+  }
 }
 
 class AgentRouterHttpClient {
@@ -352,6 +432,61 @@ class AgentRouterHttpClient {
       if (event.event === "heartbeat") continue;
       yield JSON.parse(event.data) as RunEvent;
     }
+  }
+
+  // ── sessions (M4) ──
+  async createSession(input: CreateSessionRequest): Promise<Session> {
+    return this.request<Session>("/v1/sessions", { method: "POST", body: input });
+  }
+
+  async getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }> {
+    return this.request<Session & { turns: SessionTurn[] }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}`
+    );
+  }
+
+  async sendMessage(sessionId: string, message: string): Promise<SendMessageResult> {
+    return this.request<SendMessageResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { method: "POST", body: { message } }
+    );
+  }
+
+  async sessionEvents(
+    sessionId: string,
+    query: { runId?: string; afterSeq?: number } = {}
+  ): Promise<SessionEventsResult> {
+    const params = new URLSearchParams();
+    if (query.runId) params.set("runId", query.runId);
+    if (query.afterSeq !== undefined) params.set("afterSeq", String(query.afterSeq));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<SessionEventsResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/events${suffix}`
+    );
+  }
+
+  async *streamSession(
+    sessionId: string,
+    options: { afterSeq?: number } = {}
+  ): AsyncGenerator<RunEvent> {
+    const params = new URLSearchParams();
+    if (options.afterSeq !== undefined) params.set("afterSeq", String(options.afterSeq));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    const response = await this.rawRequest(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/stream${suffix}`
+    );
+    const body = await response.text();
+    for (const event of parseSseEvents(body)) {
+      if (event.event === "heartbeat") continue;
+      yield JSON.parse(event.data) as RunEvent;
+    }
+  }
+
+  async closeSession(sessionId: string): Promise<Session> {
+    return this.request<Session>(`/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: "POST",
+      body: {}
+    });
   }
 
   async createAndWait(input: CreateAndWaitRequest): Promise<RunSession> {

@@ -22,6 +22,16 @@ export interface CodexLaunchPlanInput {
   reviewBase?: string;
 }
 
+export interface CodexSessionLaunchPlanInput {
+  mode: CodexRuntimeMode;
+  model?: string;
+  task: string;
+  workdir: string;
+  providerEnv: Record<string, string>;
+  /** True for turns after the first — resume the persisted Codex session. */
+  resume: boolean;
+}
+
 export interface CodexLaunchPlan {
   command: "codex";
   argv: string[];
@@ -95,6 +105,58 @@ export function buildCodexLaunchPlan(input: CodexLaunchPlanInput): CodexLaunchPl
     "exec",
     ...execArgs(permissionProfile, input),
     ...reviewArgs(input),
+    input.task
+  ];
+
+  if (command !== "codex") {
+    throw new Error(`Unexpected Codex command: ${command}`);
+  }
+
+  return {
+    command,
+    argv,
+    env: { ...input.providerEnv },
+    cwd: input.workdir,
+    permissionProfile
+  };
+}
+
+/**
+ * Launch plan for a multi-turn SESSION turn. Differs from the one-shot plan:
+ * - turn 1 omits `--ephemeral` so the Codex session is persisted in CODEX_HOME
+ *   (proven required for resume in the M4 spike).
+ * - later turns insert `resume --last` after `exec` to continue the session.
+ * Sessions don't use review mode.
+ */
+export function buildCodexSessionLaunchPlan(
+  input: CodexSessionLaunchPlanInput
+): CodexLaunchPlan {
+  const permissionProfile = resolveCodexPermissionProfile(input.mode);
+  if (permissionProfile.command !== "exec") {
+    throw new Error("Sessions require an exec-mode Codex profile");
+  }
+
+  const shared = [
+    "--json",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-c",
+    'shell_environment_policy.inherit="none"'
+  ];
+
+  const [command, ...profileArgs] = permissionProfile.argv;
+  const argv = [
+    ...profileArgs,
+    "--ask-for-approval",
+    "never",
+    "--sandbox",
+    permissionProfile.sandbox,
+    "--cd",
+    input.workdir,
+    ...modelArgs(input.model),
+    "exec",
+    ...(input.resume ? ["resume", "--last"] : []),
+    ...shared,
     input.task
   ];
 

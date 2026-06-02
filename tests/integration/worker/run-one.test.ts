@@ -31,6 +31,7 @@ describe("worker run-one orchestration", () => {
         const repo = new RunRepository(client);
         await repo.createRun({
           id: runId,
+          orgId: "org_test",
           runtimeKind: "codex",
           runtimeMode: "default",
           runtimeModel: "gpt-4o",
@@ -86,9 +87,9 @@ describe("worker run-one orchestration", () => {
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
-        const run = await repo.getRun(runId);
-        const events = await repo.listEvents({ runId });
-        const artifacts = await repo.listArtifacts(runId);
+        const run = await repo.getRun(runId, "org_test");
+        const events = await repo.listEvents({ runId, orgId: "org_test" });
+        const artifacts = await repo.listArtifacts(runId, "org_test");
 
         expect(run?.status).toBe("completed");
         expect(events.map((event) => event.eventType)).toEqual([
@@ -141,6 +142,7 @@ describe("worker run-one orchestration", () => {
         const repo = new RunRepository(setupClient);
         await repo.createRun({
           id: claudeRunId,
+          orgId: "org_test",
           runtimeKind: "claude_code",
           runtimeMode: "acceptEdits",
           runtimeModel: "claude-sonnet-4-6",
@@ -193,9 +195,9 @@ describe("worker run-one orchestration", () => {
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
-        const run = await repo.getRun(claudeRunId);
-        const events = await repo.listEvents({ runId: claudeRunId });
-        const artifacts = await repo.listArtifacts(claudeRunId);
+        const run = await repo.getRun(claudeRunId, "org_test");
+        const events = await repo.listEvents({ runId: claudeRunId, orgId: "org_test" });
+        const artifacts = await repo.listArtifacts(claudeRunId, "org_test");
 
         expect(run?.status).toBe("completed");
         expect(events.find((event) => event.eventType === "provider.stdout")?.source).toBe(
@@ -233,6 +235,7 @@ describe("worker run-one orchestration", () => {
         const repo = new RunRepository(setupClient);
         await repo.createRun({
           id: claudeFailureRunId,
+          orgId: "org_test",
           runtimeKind: "claude_code",
           runtimeMode: "default",
           input: {
@@ -266,8 +269,8 @@ describe("worker run-one orchestration", () => {
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
-        const run = await repo.getRun(claudeFailureRunId);
-        const events = await repo.listEvents({ runId: claudeFailureRunId });
+        const run = await repo.getRun(claudeFailureRunId, "org_test");
+        const events = await repo.listEvents({ runId: claudeFailureRunId, orgId: "org_test" });
 
         expect(run?.status).toBe("failed");
         expect(run?.failureReason).toBe(
@@ -276,7 +279,7 @@ describe("worker run-one orchestration", () => {
         expect(events.at(-1)?.eventType).toBe("run.failed");
         expect(events.at(-1)?.payload.reason).toBe(run?.failureReason);
 
-        const artifacts = await repo.listArtifacts(claudeFailureRunId);
+        const artifacts = await repo.listArtifacts(claudeFailureRunId, "org_test");
         const manifest = artifacts.find((artifact) => artifact.kind === "session_manifest");
         expect(manifest).toBeDefined();
         const manifestJson = JSON.parse(
@@ -314,6 +317,7 @@ describe("worker run-one orchestration", () => {
         const repo = new RunRepository(setupClient);
         await repo.createRun({
           id: leakRunId,
+          orgId: "org_test",
           runtimeKind: "codex",
           runtimeMode: "default",
           input: {
@@ -344,9 +348,9 @@ describe("worker run-one orchestration", () => {
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
-        const run = await repo.getRun(leakRunId);
-        const events = await repo.listEvents({ runId: leakRunId });
-        const artifacts = await repo.listArtifacts(leakRunId);
+        const run = await repo.getRun(leakRunId, "org_test");
+        const events = await repo.listEvents({ runId: leakRunId, orgId: "org_test" });
+        const artifacts = await repo.listArtifacts(leakRunId, "org_test");
 
         expect(run?.status).toBe("failed");
         expect(run?.failureReason).toBe("Credential canary leaked through workspace patch");
