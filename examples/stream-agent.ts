@@ -25,12 +25,19 @@ try {
 
   console.log(`API: ${baseUrl}`);
   console.log(`Run ${stream.run.id}: ${stream.run.status}`);
-  console.log("Streaming agent response:");
+  console.log("Streaming agent process and final response:");
 
-  for await (const textPart of stream.textStream) {
-    process.stdout.write(textPart);
+  for await (const part of stream.fullStream) {
+    if (part.type === "progress") {
+      console.log(`process: ${part.text}`);
+    } else if (part.type === "message") {
+      console.log(`agent: ${part.text}`);
+    } else if (part.type === "text") {
+      console.log(`final: ${part.text}`);
+    } else if (part.type === "error") {
+      console.log(`error: ${part.text}`);
+    }
   }
-  process.stdout.write("\n");
 
   const result = await stream.finalResult;
   console.log(`Final status: ${result.status}`);
@@ -42,8 +49,8 @@ try {
 function printHelp(): void {
   console.log(`streamAgent example
 
-Creates a Codex run, streams result text until the run is terminal, then prints
-the final status.
+Creates a Codex run, streams safe process updates and final output until the run
+is terminal, then prints the final status.
 
 Prerequisites:
   pnpm dev

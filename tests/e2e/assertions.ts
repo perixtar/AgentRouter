@@ -3,9 +3,10 @@ import { gunzipSync } from "node:zlib";
 import { expect } from "vitest";
 import type { AgentRouterClient, Artifact, RunEvent, RunSession } from "@agentrouter/sdk";
 
-const expectedEventTypes = [
+const requiredEventTypes = [
   "run.claimed",
   "sandbox.created",
+  "credential_boundary.verified",
   "provider.stdout",
   "provider.stderr",
   "agent.response",
@@ -16,6 +17,7 @@ const expectedEventTypes = [
 
 const expectedArtifactKinds = [
   "session_manifest",
+  "session_events",
   "stderr_log",
   "stdout_log",
   "workspace_file_index",
@@ -51,7 +53,12 @@ export async function assertSuccessfulE2ERun(
   expect(session.run.failure).toBeUndefined();
   expect(session.eventCursor.lastEventSeq).toBe(events.at(-1)?.sequence);
   expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1));
-  expect(events.map((event) => event.type)).toEqual(expectedEventTypes);
+  for (const eventType of requiredEventTypes) {
+    expect(events.map((event) => event.type)).toContain(eventType);
+  }
+  expect(events.some((event) => event.type.startsWith("agent.") && event.type !== "agent.response")).toBe(
+    true
+  );
 
   expect(eventByType(events, "run.claimed").source).toBe("worker");
   expect(eventByType(events, "sandbox.created").source).toBe("worker");
@@ -93,12 +100,18 @@ export async function assertSuccessfulE2ERun(
     runId,
     requiredArtifact(artifactsByKind, "session_manifest")
   );
+  const sessionEventsBytes = await downloadAndVerifyHash(
+    client,
+    runId,
+    requiredArtifact(artifactsByKind, "session_events")
+  );
 
   const stdoutText = gunzipSync(stdoutBytes).toString("utf8");
   const stderrText = gunzipSync(stderrBytes).toString("utf8");
   const fileIndexText = fileIndexBytes.toString("utf8");
   const patchText = patchBytes.toString("utf8");
   const manifestText = manifestBytes.toString("utf8");
+  const sessionEventsText = sessionEventsBytes.toString("utf8");
 
   expect(stdoutText.length).toBeGreaterThan(0);
   expect(patchText).toContain(marker);
@@ -120,9 +133,14 @@ export async function assertSuccessfulE2ERun(
     runtimeKind,
     lastEventSeq: events.at(-1)?.sequence
   });
-  expect(manifest.events.map((event) => event.type)).toEqual(expectedEventTypes);
+  for (const eventType of requiredEventTypes) {
+    expect(manifest.events.map((event) => event.type)).toContain(eventType);
+  }
   expect(manifest.artifacts.map((artifact) => artifact.kind).sort()).toEqual(
-    ["stderr_log", "stdout_log", "workspace_file_index", "workspace_patch"].sort()
+    ["session_events", "stderr_log", "stdout_log", "workspace_file_index", "workspace_patch"].sort()
+  );
+  expect(sessionEventsText.trim().split("\n").map((line) => JSON.parse(line).type)).toEqual(
+    manifest.events.map((event) => event.type)
   );
 
   const searchableOutput = [
@@ -131,7 +149,8 @@ export async function assertSuccessfulE2ERun(
     stderrText,
     fileIndexText,
     patchText,
-    manifestText
+    manifestText,
+    sessionEventsText
   ].join("\n");
   for (const canary of expectation.secretCanaries ?? []) {
     if (canary) expect(searchableOutput).not.toContain(canary);

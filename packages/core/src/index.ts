@@ -66,6 +66,20 @@ export interface AgentResponse {
   providerEventType?: string;
 }
 
+export type NormalizedAgentEventType =
+  | "agent.started"
+  | "agent.progress"
+  | "agent.message"
+  | "agent.completed"
+  | "agent.error";
+
+export interface NormalizedAgentEvent {
+  type: NormalizedAgentEventType;
+  visibility: "public";
+  providerEventType?: string;
+  payload: Record<string, unknown>;
+}
+
 const MAX_PAYLOAD_BYTES = 32 * 1024;
 const MAX_PUBLIC_TEXT_BYTES = 8 * 1024;
 
@@ -154,6 +168,75 @@ export function extractAgentResponseFromStdout(stdout: string): AgentResponse | 
   return responses.at(-1);
 }
 
+export function extractNormalizedAgentEventsFromStdout(
+  provider: RuntimeKind,
+  stdout: string
+): NormalizedAgentEvent[] {
+  const events: NormalizedAgentEvent[] = [];
+  let sawStarted = false;
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const event = parseJsonLine(line);
+    if (!event) continue;
+
+    const providerEventType = typeof event.type === "string" ? event.type : undefined;
+    const startedPayload = normalizeStartedPayload(provider, event);
+    if (startedPayload && !sawStarted) {
+      events.push({
+        type: "agent.started",
+        visibility: "public",
+        providerEventType,
+        payload: startedPayload
+      });
+      sawStarted = true;
+    }
+
+    const messageText =
+      extractCodexAgentMessage(event) ??
+      extractClaudeAssistantMessage(event) ??
+      extractGenericProviderMessage(event);
+    if (messageText) {
+      events.push({
+        type: "agent.message",
+        visibility: "public",
+        providerEventType,
+        payload: { provider, text: messageText }
+      });
+    }
+
+    const progressSummary = extractSafeProgressSummary(event);
+    if (progressSummary) {
+      events.push({
+        type: "agent.progress",
+        visibility: "public",
+        providerEventType,
+        payload: { provider, summary: progressSummary }
+      });
+    }
+
+    const resultEvent = normalizeProviderResult(provider, event);
+    if (resultEvent) {
+      events.push({
+        ...resultEvent,
+        providerEventType
+      });
+    }
+  }
+
+  return events;
+}
+
+export function sanitizeProviderStdoutForArchive(stdout: string): string {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => {
+      const event = parseJsonLine(line);
+      if (!event) return line;
+      return JSON.stringify(sanitizeProviderEvent(event));
+    })
+    .join("\n");
+}
+
 function parseJsonLine(line: string): Record<string, unknown> | undefined {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return undefined;
@@ -166,6 +249,24 @@ function parseJsonLine(line: string): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+function sanitizeProviderEvent(event: Record<string, unknown>): Record<string, unknown> {
+  if (event.type === "item.completed" && event.item && typeof event.item === "object") {
+    const item = event.item as Record<string, unknown>;
+    if (item.type === "reasoning") {
+      return {
+        ...event,
+        item: compactRecord({
+          type: item.type,
+          summary: item.summary,
+          status: item.status
+        })
+      };
+    }
+  }
+
+  return event;
 }
 
 function extractCodexAgentMessage(event: Record<string, unknown>): string | undefined {
@@ -204,4 +305,85 @@ function extractProviderResultMessage(event: Record<string, unknown>): string | 
 
 function extractGenericProviderMessage(event: Record<string, unknown>): string | undefined {
   return event.type === "message" && typeof event.message === "string" ? event.message : undefined;
+}
+
+function extractSafeProgressSummary(event: Record<string, unknown>): string | undefined {
+  if (event.type === "turn.started") return "Started a turn.";
+  if (event.type === "turn.completed") return "Completed a turn.";
+  if (event.type !== "item.completed") return undefined;
+
+  const item = event.item;
+  if (!item || typeof item !== "object") return undefined;
+  const typedItem = item as { type?: unknown; summary?: unknown };
+  if (typedItem.type !== "reasoning") return undefined;
+
+  return extractSummaryText(typedItem.summary) ?? "Reasoning step completed.";
+}
+
+function extractSummaryText(summary: unknown): string | undefined {
+  if (typeof summary === "string" && summary.trim()) return summary.trim();
+  if (!Array.isArray(summary)) return undefined;
+
+  const text = summary
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return "";
+      const maybeText = (item as { text?: unknown }).text;
+      return typeof maybeText === "string" ? maybeText : "";
+    })
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join("\n");
+
+  return text || undefined;
+}
+
+function normalizeStartedPayload(
+  provider: RuntimeKind,
+  event: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  if (provider === "codex" && event.type === "thread.started") {
+    return compactRecord({
+      provider,
+      threadId: typeof event.thread_id === "string" ? event.thread_id : undefined
+    });
+  }
+
+  if (provider === "claude_code" && event.type === "system" && event.subtype === "init") {
+    return compactRecord({
+      provider,
+      sessionId: typeof event.session_id === "string" ? event.session_id : undefined
+    });
+  }
+
+  return undefined;
+}
+
+function normalizeProviderResult(
+  provider: RuntimeKind,
+  event: Record<string, unknown>
+): NormalizedAgentEvent | undefined {
+  if (event.type !== "result") return undefined;
+  const message = typeof event.result === "string" ? event.result : undefined;
+
+  if (event.is_error === true) {
+    return {
+      type: "agent.error",
+      visibility: "public",
+      payload: {
+        provider,
+        message: message ?? "Provider reported an error"
+      }
+    };
+  }
+
+  return {
+    type: "agent.completed",
+    visibility: "public",
+    payload: compactRecord({ provider, message })
+  };
+}
+
+function compactRecord(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }

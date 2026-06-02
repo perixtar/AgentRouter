@@ -11,6 +11,7 @@ import {
   dropSchema,
   withSearchPath
 } from "@agentrouter/db";
+import { CREDENTIAL_BOUNDARY_PROBE_MARKER } from "@agentrouter/credential-boundary";
 import { runOneWorkerIteration, type WorkerSandboxDriver } from "@agentrouter/worker";
 
 loadDotEnv();
@@ -31,7 +32,6 @@ describe("worker run-one orchestration", () => {
         const repo = new RunRepository(client);
         await repo.createRun({
           id: runId,
-          orgId: "org_test",
           runtimeKind: "codex",
           runtimeMode: "default",
           runtimeModel: "gpt-4o",
@@ -87,16 +87,18 @@ describe("worker run-one orchestration", () => {
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
-        const run = await repo.getRun(runId, "org_test");
-        const events = await repo.listEvents({ runId, orgId: "org_test" });
-        const artifacts = await repo.listArtifacts(runId, "org_test");
+        const run = await repo.getRunInternal(runId);
+        const events = await repo.listEventsInternal({ runId });
+        const artifacts = await repo.listArtifactsInternal(runId);
 
         expect(run?.status).toBe("completed");
         expect(events.map((event) => event.eventType)).toEqual([
           "run.claimed",
           "sandbox.created",
+          "credential_boundary.verified",
           "provider.stdout",
           "provider.stderr",
+          "agent.message",
           "agent.response",
           "workspace.file_index_collected",
           "workspace.patch_collected",
@@ -107,6 +109,7 @@ describe("worker run-one orchestration", () => {
           provider: "codex"
         });
         expect(artifacts.map((artifact) => artifact.kind).sort()).toEqual([
+          "session_events",
           "session_manifest",
           "stderr_log",
           "stdout_log",
@@ -126,9 +129,111 @@ describe("worker run-one orchestration", () => {
         ) as { run: { status: string }; events: Array<{ type: string }> };
         expect(manifestJson.run.status).toBe("completed");
         expect(manifestJson.events.at(-1)?.type).toBe("run.completed");
+
+        const sessionEvents = artifacts.find((artifact) => artifact.kind === "session_events");
+        expect(sessionEvents).toBeDefined();
+        const eventArchive = Buffer.from(
+          await store.getObjectBytes(sessionEvents!.r2Key)
+        ).toString("utf8");
+        expect(eventArchive.trim().split("\n").map((line) => JSON.parse(line).type)).toEqual(
+          events.map((event) => event.eventType)
+        );
       });
     } finally {
       client.release();
+    }
+  }, 60_000);
+
+  it("records normalized progress events while provider stdout is streaming", async () => {
+    const streamingRunId = `run_${randomUUID()}`;
+    const streamingSandbox = new StreamingRecordingSandboxDriver({
+      stdoutChunks: [
+        `${JSON.stringify({ type: "thread.started", thread_id: "thread_stream" })}\n`,
+        `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "Checked the repo state." }],
+            content: [{ type: "reasoning_text", text: "raw hidden reasoning" }]
+          }
+        })}\n`,
+        `${JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "created reports/streaming.txt" }
+        })}\n`,
+        `${JSON.stringify({ type: "result", result: "done" })}\n`
+      ]
+    });
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        const repo = new RunRepository(setupClient);
+        await repo.createRun({
+          id: streamingRunId,
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          runtimeModel: "gpt-4o",
+          input: {
+            task: "Create reports/streaming.txt and summarize the change",
+            runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
+          },
+          promptSummary: "Create reports/streaming.txt and summarize the change"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const result = await runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: streamingSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env
+    });
+
+    expect(result).toEqual({ processed: true, runId: streamingRunId });
+    expect(streamingSandbox.streamedCommands).toHaveLength(1);
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const events = await repo.listEventsInternal({ runId: streamingRunId });
+        const eventTypes = events.map((event) => event.eventType);
+
+        expect(eventTypes).toEqual([
+          "run.claimed",
+          "sandbox.created",
+          "credential_boundary.verified",
+          "agent.started",
+          "agent.progress",
+          "agent.message",
+          "agent.completed",
+          "provider.stdout",
+          "provider.stderr",
+          "agent.response",
+          "workspace.file_index_collected",
+          "workspace.patch_collected",
+          "run.completed"
+        ]);
+        expect(events.find((event) => event.eventType === "agent.progress")?.payload).toMatchObject(
+          {
+            provider: "codex",
+            summary: "Checked the repo state."
+          }
+        );
+        expect(JSON.stringify(events.map((event) => event.payload))).not.toContain(
+          "raw hidden reasoning"
+        );
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(streamingRunId);
     }
   }, 60_000);
 
@@ -208,6 +313,7 @@ describe("worker run-one orchestration", () => {
           provider: "claude_code"
         });
         expect(artifacts.map((artifact) => artifact.kind).sort()).toEqual([
+          "session_events",
           "session_manifest",
           "stderr_log",
           "stdout_log",
@@ -298,6 +404,63 @@ describe("worker run-one orchestration", () => {
     }
   }, 60_000);
 
+  it("fails before provider launch when the sandbox credential probe sees a provider canary", async () => {
+    const leakRunId = `run_${randomUUID()}`;
+    const credentialCanary = "sk-codex-probe-canary";
+    const leakingSandbox = new RecordingSandboxDriver({
+      credentialProbeStdout: `unexpected ${credentialCanary}`
+    });
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        const repo = new RunRepository(setupClient);
+        await repo.createRun({
+          id: leakRunId,
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          input: {
+            task: "Create a report",
+            runtime: { kind: "codex", mode: "default" }
+          },
+          promptSummary: "Create a report"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const result = await runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: leakingSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: credentialCanary,
+      baseEnv: process.env
+    });
+
+    expect(result).toEqual({ processed: true, runId: leakRunId });
+    expect(leakingSandbox.commands.some((command) => command.includes("'codex'"))).toBe(false);
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const run = await repo.getRunInternal(leakRunId);
+        const events = await repo.listEventsInternal({ runId: leakRunId });
+
+        expect(run?.status).toBe("failed");
+        expect(run?.failureReason).toBe("Credential canary leaked through credential boundary probe");
+        expect(events.at(-1)?.eventType).toBe("run.failed");
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(leakRunId);
+    }
+  }, 60_000);
+
   it("fails before archiving a workspace patch that contains a provider credential", async () => {
     const leakRunId = `run_${randomUUID()}`;
     const credentialCanary = "sk-codex-worker-canary";
@@ -317,7 +480,6 @@ describe("worker run-one orchestration", () => {
         const repo = new RunRepository(setupClient);
         await repo.createRun({
           id: leakRunId,
-          orgId: "org_test",
           runtimeKind: "codex",
           runtimeMode: "default",
           input: {
@@ -348,9 +510,9 @@ describe("worker run-one orchestration", () => {
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
-        const run = await repo.getRun(leakRunId, "org_test");
-        const events = await repo.listEvents({ runId: leakRunId, orgId: "org_test" });
-        const artifacts = await repo.listArtifacts(leakRunId, "org_test");
+        const run = await repo.getRunInternal(leakRunId);
+        const events = await repo.listEventsInternal({ runId: leakRunId });
+        const artifacts = await repo.listArtifactsInternal(leakRunId);
 
         expect(run?.status).toBe("failed");
         expect(run?.failureReason).toBe("Credential canary leaked through workspace patch");
@@ -370,6 +532,8 @@ interface RecordingSandboxDriverOptions {
   claudeStderr?: string;
   codexStdout?: string;
   codexStderr?: string;
+  credentialProbeStdout?: string;
+  credentialProbeStderr?: string;
   gitDiffStdout?: string;
   gitStatusStdout?: string;
 }
@@ -395,6 +559,14 @@ class RecordingSandboxDriver implements WorkerSandboxDriver {
     _options?: { cwd?: string; env?: Record<string, string>; timeoutSeconds?: number }
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     this.commands.push(command);
+
+    if (command.includes(CREDENTIAL_BOUNDARY_PROBE_MARKER)) {
+      return {
+        exitCode: 0,
+        stdout: this.options.credentialProbeStdout ?? "probe ok\n",
+        stderr: this.options.credentialProbeStderr ?? ""
+      };
+    }
 
     if (command.includes("git status")) {
       return {
@@ -443,5 +615,37 @@ class RecordingSandboxDriver implements WorkerSandboxDriver {
 
   async deleteSandbox(sandboxId: string): Promise<void> {
     this.deletedSandboxIds.push(sandboxId);
+  }
+}
+
+class StreamingRecordingSandboxDriver extends RecordingSandboxDriver {
+  readonly streamedCommands: string[] = [];
+
+  constructor(private readonly streamOptions: { stdoutChunks: string[]; stderrChunks?: string[] }) {
+    super({
+      gitStatusStdout: "?? reports/streaming.txt\0",
+      gitDiffStdout: "diff --git a/reports/streaming.txt b/reports/streaming.txt\n"
+    });
+  }
+
+  async executeCommandStreaming(
+    _sandboxId: string,
+    command: string,
+    _options: { cwd?: string; env?: Record<string, string>; timeoutSeconds?: number } | undefined,
+    onOutput: (chunk: { stream: "stdout" | "stderr"; text: string }) => Promise<void> | void
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    this.streamedCommands.push(command);
+    for (const chunk of this.streamOptions.stdoutChunks) {
+      await onOutput({ stream: "stdout", text: chunk });
+    }
+    for (const chunk of this.streamOptions.stderrChunks ?? ["provider warning\n"]) {
+      await onOutput({ stream: "stderr", text: chunk });
+    }
+
+    return {
+      exitCode: 0,
+      stdout: this.streamOptions.stdoutChunks.join(""),
+      stderr: (this.streamOptions.stderrChunks ?? ["provider warning\n"]).join("")
+    };
   }
 }

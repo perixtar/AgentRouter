@@ -56,6 +56,7 @@ export interface RunEvent {
   runId: string;
   sequence: number;
   type: string;
+  providerEventType?: string;
   source: string;
   visibility: "public" | "internal" | "redacted";
   payload: Record<string, unknown>;
@@ -107,6 +108,13 @@ export interface AgentRunResult {
   artifactManifest: RunSession["artifactManifest"];
   artifacts: RunSession["artifacts"];
 }
+
+export type AgentStreamPart =
+  | { type: "progress"; text: string; event: RunEvent }
+  | { type: "message"; text: string; event: RunEvent }
+  | { type: "text"; text: string; event: RunEvent }
+  | { type: "error"; text: string; event: RunEvent }
+  | { type: "done"; status: Run["status"]; event: RunEvent };
 
 export interface CreateAndWaitRequest extends CreateRunRequest {
   pollIntervalMs?: number;
@@ -217,6 +225,7 @@ export interface StreamAgentRequest extends CreateRunRequest {
 export interface AgentRunStream {
   run: Run;
   events: AsyncGenerator<RunEvent>;
+  fullStream: AsyncGenerator<AgentStreamPart>;
   textStream: AsyncGenerator<string>;
   finalResult: Promise<AgentRunResult>;
 }
@@ -268,6 +277,7 @@ export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunSt
   return {
     run,
     events: streamRunEventsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
+    fullStream: streamRunPartsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
     textStream: streamRunTextUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
     finalResult: waitForRunSession(client, run.id, { pollIntervalMs, maxWaitMs }).then(
       toAgentRunResult
@@ -628,9 +638,69 @@ async function* streamRunTextUntilTerminal(
   }
 }
 
+async function* streamRunPartsUntilTerminal(
+  client: AgentRouterClient,
+  runId: string,
+  options: { pollIntervalMs?: number; maxWaitMs?: number } = {}
+): AsyncGenerator<AgentStreamPart> {
+  for await (const event of streamRunEventsUntilTerminal(client, runId, options)) {
+    const part = streamPartFromRunEvent(event);
+    if (part) yield part;
+  }
+}
+
 function textFromAgentResponseEvent(event: RunEvent): string | undefined {
   if (event.type !== "agent.response") return undefined;
   return typeof event.payload.text === "string" ? event.payload.text : undefined;
+}
+
+function streamPartFromRunEvent(event: RunEvent): AgentStreamPart | undefined {
+  if (event.type === "agent.response") {
+    const text = stringPayload(event, "text");
+    return text ? { type: "text", text, event } : undefined;
+  }
+
+  if (event.type === "agent.message") {
+    const text = stringPayload(event, "text");
+    return text ? { type: "message", text, event } : undefined;
+  }
+
+  if (event.type === "agent.error" || event.type === "run.failed") {
+    return {
+      type: "error",
+      text: stringPayload(event, "message") ?? stringPayload(event, "reason") ?? "Run failed",
+      event
+    };
+  }
+
+  if (event.type === "run.completed" || event.type === "run.cancelled") {
+    return {
+      type: "done",
+      status: event.type === "run.cancelled" ? "cancelled" : "completed",
+      event
+    };
+  }
+
+  const progressText = progressTextFromEvent(event);
+  return progressText ? { type: "progress", text: progressText, event } : undefined;
+}
+
+function progressTextFromEvent(event: RunEvent): string | undefined {
+  if (event.type === "agent.progress") {
+    return stringPayload(event, "summary") ?? stringPayload(event, "message");
+  }
+
+  if (event.type === "agent.started") return "Agent started";
+  if (event.type === "sandbox.created") return "Sandbox ready";
+  if (event.type === "credential_boundary.verified") return "Credential boundary verified";
+  if (event.type === "workspace.file_index_collected") return "Workspace file index collected";
+  if (event.type === "workspace.patch_collected") return "Workspace patch collected";
+  return undefined;
+}
+
+function stringPayload(event: RunEvent, key: string): string | undefined {
+  const value = event.payload[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 async function* streamRunEventsUntilTerminal(

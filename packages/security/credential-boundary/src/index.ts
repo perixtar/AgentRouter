@@ -1,6 +1,8 @@
 export type ProviderName = "codex" | "claude_code";
 export type CredentialStrategy = "provider_proxy" | "direct_env_proven";
 
+export const CREDENTIAL_BOUNDARY_PROBE_MARKER = "AGENTROUTER_CREDENTIAL_BOUNDARY_PROBE";
+
 export interface ProviderProcessEnvInput {
   provider: ProviderName;
   rawProviderKey: string;
@@ -71,6 +73,19 @@ export function redactCredentialCanaries(output: string, canaries: string[]): st
     (redacted, canary) => (canary.length > 0 ? redacted.replaceAll(canary, "[REDACTED]") : redacted),
     output
   );
+}
+
+export function buildCredentialBoundaryProbeCommand(): string {
+  return [
+    "set +e",
+    `printf '${CREDENTIAL_BOUNDARY_PROBE_MARKER}\\n'`,
+    "printf '%s\\n' '--env--'",
+    "env | sort",
+    "printf '%s\\n' '--proc--'",
+    "for file in /proc/$$/cmdline /proc/$$/environ; do printf '%s\\n' \"$file\"; tr '\\0' '\\n' < \"$file\" 2>/dev/null || true; done",
+    "printf '%s\\n' '--home--'",
+    "if [ -n \"$HOME\" ] && [ -d \"$HOME\" ]; then find \"$HOME\" -maxdepth 3 -type f \\( -name '*auth*' -o -name '*config*' -o -name '*.json' -o -name '*.toml' -o -name '*.env' \\) -print -exec sed -n '1,120p' {} \\; 2>/dev/null || true; fi"
+  ].join("; ");
 }
 
 function isDeniedEnvName(key: string): boolean {

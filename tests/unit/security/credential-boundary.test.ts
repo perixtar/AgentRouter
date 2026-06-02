@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CREDENTIAL_BOUNDARY_PROBE_MARKER,
+  buildCredentialBoundaryProbeCommand,
   buildProviderProcessEnv,
   redactCredentialCanaries,
   scrubToolEnvironment,
@@ -57,5 +59,15 @@ describe("credential boundary", () => {
     expect(redactCredentialCanaries("leaked sk-canary", ["sk-canary"])).toBe(
       "leaked [REDACTED]"
     );
+  });
+
+  it("builds a sandbox credential probe without embedding the credential canary", () => {
+    const probe = buildCredentialBoundaryProbeCommand();
+
+    expect(probe).toContain(CREDENTIAL_BOUNDARY_PROBE_MARKER);
+    expect(probe).toContain("env");
+    expect(probe).toContain("/proc");
+    expect(probe).toContain("$HOME");
+    expect(probe).not.toContain("sk-test-canary");
   });
 });

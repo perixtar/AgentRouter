@@ -903,6 +903,7 @@ function eventToApi(event: EventRecord): Record<string, unknown> {
     runId: event.runId,
     sequence: Number(event.sequence),
     type: event.eventType,
+    providerEventType: event.providerEventType,
     source: event.source,
     visibility: event.visibility,
     payload: event.payload,

@@ -29,7 +29,7 @@ AGENTROUTER_SESSION_ID=run_... AGENTROUTER_AFTER_SEQ=0 pnpm example:run-agent
 
 ## streamAgent
 
-Create a run and stream the final agent response through `textStream`:
+Create a run and stream safe process updates plus final output through `fullStream`:
 
 ```sh
 pnpm example:stream-agent

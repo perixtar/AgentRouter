@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { R2ArtifactStore } from "@agentrouter/artifacts-r2";
-import { extractAgentResponseFromStdout } from "@agentrouter/core";
 import {
+  extractAgentResponseFromStdout,
+  extractNormalizedAgentEventsFromStdout,
+  sanitizeProviderStdoutForArchive
+} from "@agentrouter/core";
+import {
+  buildCredentialBoundaryProbeCommand,
   buildProviderProcessEnv,
   redactCredentialCanaries,
   scanForCredentialCanaries
@@ -21,6 +26,23 @@ import {
   buildCodexSessionLaunchPlan
 } from "@agentrouter/runtime-codex-cli";
 
+export interface SandboxCommandOptions {
+  cwd?: string;
+  env?: Record<string, string>;
+  timeoutSeconds?: number;
+}
+
+export interface SandboxOutputChunk {
+  stream: "stdout" | "stderr";
+  text: string;
+}
+
+export interface SandboxCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
 export interface WorkerSandboxDriver {
   createSandbox(input: {
     name: string;
@@ -31,8 +53,14 @@ export interface WorkerSandboxDriver {
   executeCommand(
     sandboxId: string,
     command: string,
-    options?: { cwd?: string; env?: Record<string, string>; timeoutSeconds?: number }
-  ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+    options?: SandboxCommandOptions
+  ): Promise<SandboxCommandResult>;
+  executeCommandStreaming?(
+    sandboxId: string,
+    command: string,
+    options: SandboxCommandOptions | undefined,
+    onOutput: (chunk: SandboxOutputChunk) => Promise<void> | void
+  ): Promise<SandboxCommandResult>;
   deleteSandbox(sandboxId: string): Promise<void>;
   // Optional persistent-session ops (present on the real Daytona driver).
   waitUntilReady?(sandboxId: string): Promise<void>;
@@ -201,11 +229,12 @@ async function executeOneShotRun(
       await repo.updateRunStatus(run.id, "running");
     });
 
+    await verifySandboxCredentialBoundary(input, run.id, sandbox.id, runtime);
     await requireSuccessfulCommand("workspace_setup", setupScratchWorkspace(input.sandbox, sandbox.id));
     await ensureProviderRuntime(input.sandbox, sandbox.id, runtime.provider);
 
     const command = shellCommand(runtime.launchPlan.command, runtime.launchPlan.argv);
-    const result = await input.sandbox.executeCommand(sandbox.id, command, {
+    const result = await executeProviderCommand(input, run.id, sandbox.id, runtime, command, {
       cwd: repoDir,
       env: providerRuntimeEnv(runtime.launchPlan.env),
       timeoutSeconds: 0
@@ -215,10 +244,14 @@ async function executeOneShotRun(
       runtime.credentialCanaries,
       "provider output"
     );
-    stdout = redactCredentialCanaries(result.stdout, runtime.credentialCanaries);
+    stdout = sanitizeProviderStdoutForArchive(
+      redactCredentialCanaries(result.stdout, runtime.credentialCanaries)
+    );
     stderr = redactCredentialCanaries(result.stderr, runtime.credentialCanaries);
 
-    await appendOutputAndArtifacts(input, run.id, attemptId, runtime.eventSource, stdout, stderr);
+    await appendOutputAndArtifacts(input, run.id, attemptId, runtime.eventSource, stdout, stderr, {
+      recordNormalizedEvents: !result.normalizedEventsStreamed
+    });
 
     const fileIndex = await collectWorkspaceFileIndex(input.sandbox, sandbox.id);
     assertNoCredentialLeaks(
@@ -541,6 +574,10 @@ interface TerminalRunSnapshot {
   failure?: { code: string; reason: string };
 }
 
+interface ProviderCommandResult extends SandboxCommandResult {
+  normalizedEventsStreamed: boolean;
+}
+
 function providerFailureReason(
   runtime: RuntimeLaunch,
   exitCode: number,
@@ -753,12 +790,135 @@ async function ensureProviderRuntime(
 
 async function requireSuccessfulCommand(
   step: string,
-  commandResultPromise: Promise<{ exitCode: number; stdout: string; stderr: string }>
+  commandResultPromise: Promise<SandboxCommandResult>
 ): Promise<void> {
   const result = await commandResultPromise;
   if (result.exitCode !== 0) {
     throw new Error(`${step} failed: ${result.stdout}${result.stderr}`);
   }
+}
+
+async function executeProviderCommand(
+  input: RunOneWorkerIterationInput,
+  runId: string,
+  sandboxId: string,
+  runtime: RuntimeLaunch,
+  command: string,
+  options: SandboxCommandOptions
+): Promise<ProviderCommandResult> {
+  if (!input.sandbox.executeCommandStreaming) {
+    const result = await input.sandbox.executeCommand(sandboxId, command, options);
+    return { ...result, normalizedEventsStreamed: false };
+  }
+
+  let stdout = "";
+  let stderr = "";
+  let pendingStdout = "";
+
+  const flushStdoutLine = async (line: string): Promise<void> => {
+    if (!line.trim()) return;
+    assertNoCredentialLeaks(line, runtime.credentialCanaries, "provider output");
+    await appendNormalizedAgentEvents(input, runId, runtime.eventSource, line);
+  };
+
+  const result = await input.sandbox.executeCommandStreaming(
+    sandboxId,
+    command,
+    options,
+    async (chunk) => {
+      if (chunk.stream === "stderr") {
+        stderr += chunk.text;
+        return;
+      }
+
+      stdout += chunk.text;
+      pendingStdout += chunk.text;
+
+      for (;;) {
+        const newlineIndex = pendingStdout.search(/\r?\n/);
+        if (newlineIndex === -1) break;
+        const line = pendingStdout.slice(0, newlineIndex);
+        const newlineLength =
+          pendingStdout[newlineIndex] === "\r" && pendingStdout[newlineIndex + 1] === "\n"
+            ? 2
+            : 1;
+        pendingStdout = pendingStdout.slice(newlineIndex + newlineLength);
+        await flushStdoutLine(line);
+      }
+    }
+  );
+
+  if (pendingStdout.trim()) {
+    await flushStdoutLine(pendingStdout);
+  }
+
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout || stdout,
+    stderr: result.stderr || stderr,
+    normalizedEventsStreamed: true
+  };
+}
+
+async function verifySandboxCredentialBoundary(
+  input: RunOneWorkerIterationInput,
+  runId: string,
+  sandboxId: string,
+  runtime: RuntimeLaunch
+): Promise<void> {
+  const result = await input.sandbox.executeCommand(
+    sandboxId,
+    buildCredentialBoundaryProbeCommand(),
+    { timeoutSeconds: 0 }
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`credential_boundary_probe failed: ${result.stdout}${result.stderr}`);
+  }
+
+  assertNoCredentialLeaks(
+    result.stdout + result.stderr,
+    runtime.credentialCanaries,
+    "credential boundary probe"
+  );
+
+  await withClient(input, async (client) => {
+    const repo = new RunRepository(client);
+    await repo.appendEvent({
+      runId,
+      source: "worker",
+      eventType: "credential_boundary.verified",
+      visibility: "internal",
+      payload: {
+        provider: runtime.provider,
+        credentialStrategy: runtime.credentialBoundary.credentialStrategy,
+        checkedSurfaces: ["env", "proc", "home"]
+      }
+    });
+  });
+}
+
+async function appendNormalizedAgentEvents(
+  input: RunOneWorkerIterationInput,
+  runId: string,
+  providerSource: string,
+  stdout: string
+): Promise<void> {
+  const events = extractNormalizedAgentEventsFromStdout(providerSource as RuntimeProvider, stdout);
+  if (events.length === 0) return;
+
+  await withClient(input, async (client) => {
+    const repo = new RunRepository(client);
+    for (const event of events) {
+      await repo.appendEvent({
+        runId,
+        source: providerSource,
+        eventType: event.type,
+        providerEventType: event.providerEventType,
+        visibility: event.visibility,
+        payload: event.payload
+      });
+    }
+  });
 }
 
 async function appendOutputAndArtifacts(
@@ -767,7 +927,8 @@ async function appendOutputAndArtifacts(
   attemptId: string,
   providerSource: string,
   stdout: string,
-  stderr: string
+  stderr: string,
+  options: { recordNormalizedEvents?: boolean } = {}
 ): Promise<void> {
   const stdoutArtifact = await input.artifactStore.putLogChunk({
     runId,
@@ -828,6 +989,19 @@ async function appendOutputAndArtifacts(
       payload: { text: stderr },
       artifactRef: { artifactId: stderrRecord.id, r2Key: stderrRecord.r2Key }
     });
+
+    if (options.recordNormalizedEvents ?? true) {
+      for (const event of extractNormalizedAgentEventsFromStdout(providerSource as RuntimeProvider, stdout)) {
+        await repo.appendEvent({
+          runId,
+          source: providerSource,
+          eventType: event.type,
+          providerEventType: event.providerEventType,
+          visibility: event.visibility,
+          payload: event.payload
+        });
+      }
+    }
 
     const response = extractAgentResponseFromStdout(stdout);
     if (response) {
@@ -954,33 +1128,86 @@ async function recordSessionManifest(
   attemptId: string,
   terminalSnapshot: TerminalRunSnapshot
 ): Promise<void> {
-  const manifest = await withClient(input, async (client) => {
+  const session = await withClient(input, async (client) => {
     const repo = new RunRepository(client);
     const run = await repo.getRunInternal(runId);
     const events = await repo.listEventsInternal({ runId, limit: 500 });
-    const artifacts = await repo.listArtifactsInternal(runId);
     const lastEventSeq = events.at(-1)?.sequence ?? run?.lastEventSeq ?? 0n;
+
+    const archivedEvents = [
+      ...events.map((event) => ({
+        sequence: Number(event.sequence),
+        type: event.eventType,
+        providerEventType: event.providerEventType,
+        source: event.source,
+        visibility: event.visibility,
+        payload: event.payload,
+        artifactRef: event.artifactRef,
+        createdAt: event.createdAt.toISOString()
+      })),
+      {
+        sequence: Number(lastEventSeq + 1n),
+        type: terminalSnapshot.eventType,
+        source: "worker",
+        visibility: "public",
+        payload: terminalSnapshot.payload
+      }
+    ];
+
+    return {
+      run,
+      lastEventSeq,
+      archivedEvents
+    };
+  });
+
+  const eventsJsonl = `${session.archivedEvents
+    .map((event) => JSON.stringify(event))
+    .join("\n")}\n`;
+  const storedEvents = await input.artifactStore.putArtifact({
+    runId,
+    path: "session/events.jsonl",
+    body: Buffer.from(eventsJsonl, "utf8"),
+    contentType: "application/x-ndjson",
+    metadata: {
+      eventSequenceStart: "1",
+      eventSequenceEnd: String(session.lastEventSeq + 1n)
+    }
+  });
+
+  await withClient(input, async (client) => {
+    const repo = new RunRepository(client);
+    await repo.recordArtifact({
+      id: `artifact_${randomUUID()}`,
+      runId,
+      runAttemptId: attemptId,
+      kind: "session_events",
+      r2Key: storedEvents.r2Key,
+      contentType: storedEvents.contentType,
+      sizeBytes: storedEvents.sizeBytes,
+      sha256: storedEvents.sha256,
+      metadata: storedEvents.metadata
+    });
+  });
+
+  const manifest = await withClient(input, async (client) => {
+    const repo = new RunRepository(client);
+    const artifacts = await repo.listArtifactsInternal(runId);
     return {
       run: {
-        id: run?.id,
+        id: session.run?.id,
         status: terminalSnapshot.status,
-        runtimeKind: run?.runtimeKind,
-        runtimeMode: run?.runtimeMode,
-        runtimeModel: run?.runtimeModel,
-        lastEventSeq: Number(lastEventSeq + 1n),
+        runtimeKind: session.run?.runtimeKind,
+        runtimeMode: session.run?.runtimeMode,
+        runtimeModel: session.run?.runtimeModel,
+        lastEventSeq: Number(session.lastEventSeq + 1n),
         failure: terminalSnapshot.failure
       },
-      events: [
-        ...events.map((event) => ({
-          sequence: Number(event.sequence),
-          type: event.eventType,
-          artifactRef: event.artifactRef
-        })),
-        {
-          sequence: Number(lastEventSeq + 1n),
-          type: terminalSnapshot.eventType
-        }
-      ],
+      events: session.archivedEvents.map((event) => ({
+        sequence: event.sequence,
+        type: event.type,
+        artifactRef: "artifactRef" in event ? event.artifactRef : undefined
+      })),
       artifacts: artifacts.map((artifact) => ({
         id: artifact.id,
         kind: artifact.kind,

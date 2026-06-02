@@ -154,13 +154,23 @@ describe("AgentRouter TypeScript SDK", () => {
       task: "Stream this repo summary",
       runtime: codex({ mode: "default", model: "gpt-4o" }),
       pollIntervalMs: 1,
-      maxWaitMs: 1000
+      maxWaitMs: 10_000
     });
 
     const client = await pool.connect();
     try {
       await withSearchPath(client, schema, async () => {
         const repo = new RunRepository(client);
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "agent.progress",
+          visibility: "public",
+          payload: {
+            summary: "Inspected the repository before answering",
+            provider: "codex"
+          }
+        });
         await repo.appendEvent({
           runId: stream.run.id,
           source: "worker",
@@ -192,9 +202,29 @@ describe("AgentRouter TypeScript SDK", () => {
       events.push(event);
     }
 
-    expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ type: "agent.response" });
-    expect(events[1]).toMatchObject({ type: "run.completed" });
+    expect(events).toHaveLength(3);
+    expect(events[0]).toMatchObject({ type: "agent.progress" });
+    expect(events[1]).toMatchObject({ type: "agent.response" });
+    expect(events[2]).toMatchObject({ type: "run.completed" });
+
+    const streamParts = [];
+    for await (const part of stream.fullStream) {
+      streamParts.push(part);
+    }
+    expect(streamParts).toEqual([
+      expect.objectContaining({
+        type: "progress",
+        text: "Inspected the repository before answering"
+      }),
+      expect.objectContaining({
+        type: "text",
+        text: "streamed final answer"
+      }),
+      expect.objectContaining({
+        type: "done",
+        status: "completed"
+      })
+    ]);
 
     const textParts: string[] = [];
     for await (const textPart of stream.textStream) {

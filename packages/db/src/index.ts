@@ -365,7 +365,7 @@ async function addRuntimeModeConstraint(
 
 export interface CreateRunInput {
   id: string;
-  orgId: string;
+  orgId?: string | null;
   sessionId?: string;
   runtimeKind: RuntimeKind;
   runtimeMode: RuntimePermissionValue;
@@ -423,6 +423,7 @@ export interface AppendEventInput {
   runId: string;
   source: string;
   eventType: string;
+  providerEventType?: string;
   visibility: "public" | "internal" | "redacted";
   payload: Record<string, unknown>;
   artifactRef?: ArtifactRef;
@@ -432,6 +433,7 @@ export interface EventRecord {
   runId: string;
   sequence: bigint;
   eventType: string;
+  providerEventType?: string;
   source: string;
   visibility: "public" | "internal" | "redacted";
   payload: Record<string, unknown>;
@@ -767,10 +769,10 @@ export class RunRepository {
     const result = await this.client.query(
       `
         insert into run_events (
-          run_id, sequence, source, event_type, visibility,
+          run_id, sequence, source, event_type, provider_event_type, visibility,
           payload_json, payload_size_bytes, artifact_ref_json, is_truncated
         )
-        values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9)
+        values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10)
         returning created_at
       `,
       [
@@ -778,6 +780,7 @@ export class RunRepository {
         sequence.toString(),
         input.source,
         input.eventType,
+        input.providerEventType,
         input.visibility,
         JSON.stringify(normalized.payload),
         normalized.payloadSizeBytes,
@@ -790,6 +793,7 @@ export class RunRepository {
       runId: input.runId,
       sequence,
       eventType: input.eventType,
+      providerEventType: input.providerEventType,
       source: input.source,
       visibility: input.visibility,
       payload: normalized.payload,
@@ -1321,6 +1325,7 @@ function mapEvent(row: Record<string, unknown>): EventRecord {
     runId: String(row.run_id),
     sequence: BigInt(String(row.sequence)),
     eventType: String(row.event_type),
+    providerEventType: optionalString(row.provider_event_type),
     source: String(row.source),
     visibility: row.visibility as EventRecord["visibility"],
     payload: asRecord(row.payload_json),
