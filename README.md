@@ -34,10 +34,10 @@ workflow, such as:
 - CI workflows that run an agent and collect logs/artifacts.
 
 AgentRouter handles the execution surface around those agents: isolated Daytona
-sandboxes, long-running jobs, streaming progress, sessions, permissions,
-provider keys, logs, generated files, patches, artifacts, and resume behavior.
-The same API and TypeScript SDK can run Codex or Claude Code behind one
-interface.
+sandboxes, long-running jobs, streaming progress, conversation state,
+permissions, provider keys, logs, generated files, patches, artifacts, and
+resume behavior. The same API and TypeScript SDK can run Codex or Claude Code
+behind one interface.
 
 AgentRouter lets you focus on the agent your users need, not the runtime
 infrastructure required to operate it.
@@ -143,6 +143,8 @@ cp .env.example .env
 Fill in the required values:
 
 ```sh
+# Private bearer token for your self-hosted AgentRouter API.
+# This is not an OpenAI/Anthropic provider key; choose any random value.
 AGENTROUTER_API_KEY=ar_local_dev_secret
 DATABASE_URL=postgres://...
 DAYTONA_API_KEY=...
@@ -230,6 +232,11 @@ pnpm example:quickstart:run
 
 A run id can become the conversation handle. Start a run, then continue it by
 posting a follow-up message to the same run id.
+
+The public SDK uses run ids as the only conversation handle. Use
+`streamAgent({ continueRun, message })` for streamed follow-up turns, or
+`runAgent({ continueRun, message })` when you only need the final result.
+There is no separate public session API.
 
 ```ts
 import { agentrouter, codex, streamAgent } from "@agentrouterhq/sdk";

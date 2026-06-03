@@ -116,6 +116,10 @@ for await (const text of stream.textStream) {
 AgentRouter can keep a sandbox and provider thread alive after a run finishes.
 The first run id becomes the conversation handle.
 
+Run ids are the SDK's public conversation handle. Use `streamAgent` with
+`continueRun` for streamed follow-up turns, or `runAgent` with `continueRun`
+when you only need the final result. There is no separate public session API.
+
 ```ts
 import { agentrouter, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
 
@@ -193,7 +197,7 @@ for await (const event of client.streamRun(run.id)) {
   console.log(event.sequence, event.type);
 }
 
-const session = await client.getRunSession(run.id);
+const runSession = await client.getRunSession(run.id);
 const artifacts = await client.listRunArtifacts(run.id);
 ```
 
@@ -202,12 +206,12 @@ Available client methods:
 | Method | Purpose |
 | --- | --- |
 | `createRun` | Queue a new agent run |
-| `createRunAndWait` | Queue a run and wait for the final session |
+| `createRunAndWait` | Queue a run and wait for the final run session snapshot |
 | `getRun`, `listRuns`, `cancelRun` | Inspect and control runs |
 | `listRunEvents`, `streamRun` | Read observable run events |
-| `getRunSession` | Get final response, event cursor, and artifact manifest |
+| `getRunSession` | Get the final run response, event cursor, and artifact manifest |
 | `listRunArtifacts`, `downloadArtifact` | Inspect and download artifacts |
-| `continueRun`, `getRunTurns`, `closeRun` | Continue or close a run-id conversation |
+| `continueRun`, `getRunTurns`, `closeRun` | Continue, inspect, or close a run-id conversation |
 
 ## Runtime options
 

@@ -29,6 +29,8 @@ cp .env.example .env
 Required runtime values:
 
 ```sh
+# Private bearer token for your self-hosted AgentRouter API.
+# This is not an OpenAI/Anthropic provider key; choose any random value.
 AGENTROUTER_API_KEY=ar_local_dev_secret
 DATABASE_URL=postgres://user:pass@host:5432/agentrouter
 DAYTONA_API_KEY=...
@@ -87,6 +89,18 @@ The worker creates Daytona sandboxes for runs. One-shot runs are deleted when
 finished unless they are eligible for a short continuation grace window.
 Continued Codex conversations use a persistent sandbox and are reclaimed by the
 worker reaper after the idle deadline.
+
+The public API is run-id based:
+
+- `POST /v1/runs` creates the first run.
+- `POST /v1/runs/:runId/messages` continues a conversation.
+- `GET /v1/runs/:runId/turns` lists conversation turns.
+- `POST /v1/runs/:runId/close` closes the conversation and arms sandbox
+  reclaim.
+
+There is no separate public session API in the pre-launch surface. Internal
+session rows are only an implementation detail for preserving the sandbox and
+provider thread between run-id turns.
 
 Useful lifecycle env vars:
 
