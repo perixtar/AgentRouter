@@ -861,33 +861,7 @@ export class RunRepository {
     return result.rows[0] ? mapArtifact(result.rows[0]) : undefined;
   }
 
-  // ── Multi-turn sessions (M4) — all org-scoped. ──
-
-  async createSession(input: {
-    id: string;
-    orgId: string;
-    runtimeKind: RuntimeKind;
-    runtimeMode: RuntimePermissionValue;
-    runtimeModel?: RuntimeModel;
-    title?: string;
-  }): Promise<SessionRecord> {
-    const result = await this.client.query(
-      `
-        insert into sessions (id, org_id, runtime_kind, runtime_mode, runtime_model, title)
-        values ($1, $2, $3, $4, $5, $6)
-        returning *
-      `,
-      [
-        input.id,
-        input.orgId,
-        input.runtimeKind,
-        input.runtimeMode,
-        input.runtimeModel,
-        input.title
-      ]
-    );
-    return mapSession(result.rows[0]);
-  }
+  // ── Run-id conversation state (org-scoped where externally visible). ──
 
   async getSession(sessionId: string, orgId: string): Promise<SessionRecord | undefined> {
     const result = await this.client.query(
@@ -901,14 +875,6 @@ export class RunRepository {
   async getSessionInternal(sessionId: string): Promise<SessionRecord | undefined> {
     const result = await this.client.query(`select * from sessions where id = $1`, [sessionId]);
     return result.rows[0] ? mapSession(result.rows[0]) : undefined;
-  }
-
-  async listSessions(orgId: string, limit = 50): Promise<SessionRecord[]> {
-    const result = await this.client.query(
-      `select * from sessions where org_id = $1 order by last_active_at desc limit $2`,
-      [orgId, Math.min(Math.max(limit, 1), 100)]
-    );
-    return result.rows.map(mapSession);
   }
 
   /**

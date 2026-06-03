@@ -4,7 +4,7 @@ import {
   handleExampleError,
   hasHelpFlag,
   makeExampleClient
-} from "./shared.js";
+} from "../shared.js";
 
 if (hasHelpFlag()) {
   printHelp();
@@ -60,7 +60,7 @@ Or run the processes separately:
   pnpm worker:dev
 
 Run:
-  pnpm example:stream-agent
+  pnpm example:quickstart:stream
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787

@@ -1,4 +1,4 @@
-import { hasHelpFlag, makeExampleClient } from "./shared.js";
+import { hasHelpFlag, makeExampleClient } from "../shared.js";
 
 interface ToolDefinition {
   name: string;
@@ -84,7 +84,7 @@ Or run only the API:
   pnpm api:dev
 
 Run:
-  pnpm example:create-tool
+  pnpm example:recipe:tool-boundary
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787

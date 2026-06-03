@@ -138,48 +138,6 @@ export interface ClaudeCodeRuntimeOptions {
   model?: string;
 }
 
-// ── Multi-turn sessions (M4) ──
-
-export interface Session {
-  id: string;
-  runtime: ResolvedRuntimeSelection;
-  title?: string;
-  status: "active" | "closed";
-  sandboxState: "none" | "creating" | "running" | "suspended" | "deleted";
-  turnCount: number;
-  createdAt: string;
-  lastActiveAt: string;
-}
-
-export interface SessionTurn {
-  id: string;
-  runId: string;
-  turnNumber: number;
-  prompt: string;
-  createdAt: string;
-}
-
-export interface CreateSessionRequest {
-  runtime?: CodexRuntimeSelection;
-  title?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface SendMessageResult {
-  runId: string;
-  turnNumber: number;
-  sessionId: string;
-}
-
-export interface SessionEventsResult {
-  sessionId: string;
-  runId?: string;
-  status?: Run["status"];
-  failure?: { code?: string; reason?: string };
-  items: RunEvent[];
-  nextAfterSeq: number;
-}
-
 // ── Run-id multi-turn (M1 API): the run id is the conversation handle. ──
 
 export interface ContinueRunResult {
@@ -227,16 +185,6 @@ export interface AgentRouterClient {
   continueRun(runId: string, message: string): Promise<ContinueRunResult>;
   getRunTurns(runId: string): Promise<RunTurnsResult>;
   closeRun(runId: string): Promise<CloseRunResult>;
-  // ── sessions (M4) ──
-  createSession(input?: CreateSessionRequest): Promise<Session>;
-  getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }>;
-  sendMessage(sessionId: string, message: string): Promise<SendMessageResult>;
-  listSessionEvents(
-    sessionId: string,
-    query?: { runId?: string; afterSeq?: number }
-  ): Promise<SessionEventsResult>;
-  streamSession(sessionId: string, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
-  closeSession(sessionId: string): Promise<Session>;
 }
 
 export interface RunAgentCreateRequest extends CreateAndWaitRequest {
@@ -263,24 +211,35 @@ export interface RunAgentResumeRequest {
 
 export type RunAgentRequest = RunAgentCreateRequest | RunAgentResumeRequest;
 
-export interface StreamAgentRequest extends CreateRunRequest {
+export interface StreamAgentCreateRequest extends CreateRunRequest {
   client: AgentRouterClient;
+  continueRun?: never;
+  message?: never;
+  afterSeq?: number;
   pollIntervalMs?: number;
   maxWaitMs?: number;
 }
 
-export interface ContinueAgentRequest {
+export interface StreamAgentResumeRequest {
   client: AgentRouterClient;
-  /** The conversation handle (the first run's id). */
-  runId: string;
+  continueRun: string;
   message: string;
+  afterSeq?: number;
+  pollIntervalMs?: number;
+  maxWaitMs?: number;
+}
+
+export type StreamAgentRequest = StreamAgentCreateRequest | StreamAgentResumeRequest;
+
+interface StreamWaitOptions {
+  afterSeq?: number;
   pollIntervalMs?: number;
   maxWaitMs?: number;
 }
 
 export interface AgentRunStream {
   run: Run;
-  /** The new turn's run id (for continueAgent: the turn just enqueued). */
+  /** Stable conversation handle. For continued streams, this is the original run id. */
   conversationId: string;
   turnNumber?: number;
   events: AsyncGenerator<RunEvent>;
@@ -350,38 +309,57 @@ function isCompletedContinuableCodexRun(run: Run): boolean {
 }
 
 export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunStream> {
-  const { client, pollIntervalMs, maxWaitMs, ...request } = input;
-  const run = await client.createRun(request);
-  return {
-    run,
-    conversationId: run.conversationId ?? run.id,
-    events: streamRunEventsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
-    fullStream: streamRunPartsUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
-    textStream: streamRunTextUntilTerminal(client, run.id, { pollIntervalMs, maxWaitMs }),
-    finalResult: waitForRun(client, run.id, { pollIntervalMs, maxWaitMs }).then(
-      toAgentRunResult
-    )
-  };
+  const { client, pollIntervalMs, maxWaitMs, afterSeq } = input;
+  const streamOptions = { afterSeq, pollIntervalMs, maxWaitMs };
+
+  if (isStreamAgentResumeRequest(input)) {
+    const { runId, turnNumber, conversationId } = await client.continueRun(
+      input.continueRun,
+      input.message
+    );
+    const run = await client.getRun(runId);
+    return {
+      run,
+      conversationId,
+      turnNumber,
+      events: streamRunEventsUntilTerminal(client, runId, streamOptions),
+      fullStream: streamRunPartsUntilTerminal(client, runId, streamOptions),
+      textStream: streamRunTextUntilTerminal(client, runId, streamOptions),
+      finalResult: waitForRun(client, runId, streamOptions).then(toAgentRunResult)
+    };
+  }
+
+  if (isStreamAgentCreateRequest(input)) {
+    const { task, runtime, metadata, idempotencyKey } = input;
+    const request: CreateRunRequest = { task, runtime, metadata, idempotencyKey };
+    const run = await client.createRun(request);
+    return {
+      run,
+      conversationId: run.conversationId ?? run.id,
+      events: streamRunEventsUntilTerminal(client, run.id, streamOptions),
+      fullStream: streamRunPartsUntilTerminal(client, run.id, streamOptions),
+      textStream: streamRunTextUntilTerminal(client, run.id, streamOptions),
+      finalResult: waitForRun(client, run.id, streamOptions).then(toAgentRunResult)
+    };
+  }
+
+  throw new AgentRouterError(
+    "invalid_stream_agent_request",
+    "streamAgent requires either { task } to start or { continueRun, message } to continue"
+  );
 }
 
-/**
- * Continue a conversation by run id and stream the new turn's events/text.
- * Mirrors `streamAgent` but for turn 2+: sends the follow-up message, then
- * streams the freshly-enqueued turn's run. `run` here is the turn's run.
- */
-export async function continueAgent(input: ContinueAgentRequest): Promise<AgentRunStream> {
-  const { client, runId, message, pollIntervalMs, maxWaitMs } = input;
-  const { runId: turnRunId, turnNumber, conversationId } = await client.continueRun(runId, message);
-  const run = await client.getRun(turnRunId);
-  return {
-    run,
-    conversationId,
-    turnNumber,
-    events: streamRunEventsUntilTerminal(client, turnRunId, { pollIntervalMs, maxWaitMs }),
-    fullStream: streamRunPartsUntilTerminal(client, turnRunId, { pollIntervalMs, maxWaitMs }),
-    textStream: streamRunTextUntilTerminal(client, turnRunId, { pollIntervalMs, maxWaitMs }),
-    finalResult: waitForRun(client, turnRunId, { pollIntervalMs, maxWaitMs }).then(toAgentRunResult)
-  };
+function isStreamAgentResumeRequest(input: StreamAgentRequest): input is StreamAgentResumeRequest {
+  return (
+    "continueRun" in input &&
+    typeof input.continueRun === "string" &&
+    input.continueRun.length > 0 &&
+    typeof input.message === "string"
+  );
+}
+
+function isStreamAgentCreateRequest(input: StreamAgentRequest): input is StreamAgentCreateRequest {
+  return "task" in input && typeof input.task === "string";
 }
 
 class AgentRouterClientImpl implements AgentRouterClient {
@@ -484,33 +462,6 @@ class AgentRouterClientImpl implements AgentRouterClient {
     }
   }
 
-  // ── sessions (M4) ──
-  async createSession(input: CreateSessionRequest = {}): Promise<Session> {
-    return this.http.createSession(input);
-  }
-
-  async getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }> {
-    return this.http.getSession(sessionId);
-  }
-
-  async sendMessage(sessionId: string, message: string): Promise<SendMessageResult> {
-    return this.http.sendMessage(sessionId, message);
-  }
-
-  async listSessionEvents(
-    sessionId: string,
-    query: { runId?: string; afterSeq?: number } = {}
-  ): Promise<SessionEventsResult> {
-    return this.http.sessionEvents(sessionId, query);
-  }
-
-  streamSession(sessionId: string, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
-    return this.http.streamSession(sessionId, options);
-  }
-
-  async closeSession(sessionId: string): Promise<Session> {
-    return this.http.closeSession(sessionId);
-  }
 }
 
 class AgentRouterHttpClient {
@@ -612,61 +563,6 @@ class AgentRouterHttpClient {
       if (event.event === "heartbeat") continue;
       yield JSON.parse(event.data) as RunEvent;
     }
-  }
-
-  // ── sessions (M4) ──
-  async createSession(input: CreateSessionRequest): Promise<Session> {
-    return this.request<Session>("/v1/sessions", { method: "POST", body: input });
-  }
-
-  async getSession(sessionId: string): Promise<Session & { turns: SessionTurn[] }> {
-    return this.request<Session & { turns: SessionTurn[] }>(
-      `/v1/sessions/${encodeURIComponent(sessionId)}`
-    );
-  }
-
-  async sendMessage(sessionId: string, message: string): Promise<SendMessageResult> {
-    return this.request<SendMessageResult>(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { method: "POST", body: { message } }
-    );
-  }
-
-  async sessionEvents(
-    sessionId: string,
-    query: { runId?: string; afterSeq?: number } = {}
-  ): Promise<SessionEventsResult> {
-    const params = new URLSearchParams();
-    if (query.runId) params.set("runId", query.runId);
-    if (query.afterSeq !== undefined) params.set("afterSeq", String(query.afterSeq));
-    const suffix = params.size > 0 ? `?${params.toString()}` : "";
-    return this.request<SessionEventsResult>(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/events${suffix}`
-    );
-  }
-
-  async *streamSession(
-    sessionId: string,
-    options: { afterSeq?: number } = {}
-  ): AsyncGenerator<RunEvent> {
-    const params = new URLSearchParams();
-    if (options.afterSeq !== undefined) params.set("afterSeq", String(options.afterSeq));
-    const suffix = params.size > 0 ? `?${params.toString()}` : "";
-    const response = await this.rawRequest(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/stream${suffix}`
-    );
-    const body = await response.text();
-    for (const event of parseSseEvents(body)) {
-      if (event.event === "heartbeat") continue;
-      yield JSON.parse(event.data) as RunEvent;
-    }
-  }
-
-  async closeSession(sessionId: string): Promise<Session> {
-    return this.request<Session>(`/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
-      method: "POST",
-      body: {}
-    });
   }
 
   async createAndWait(input: CreateAndWaitRequest): Promise<RunSession> {
@@ -815,7 +711,7 @@ function toAgentRunResult(session: RunSession): AgentRunResult {
 async function* streamRunTextUntilTerminal(
   client: AgentRouterClient,
   runId: string,
-  options: { pollIntervalMs?: number; maxWaitMs?: number } = {}
+  options: StreamWaitOptions = {}
 ): AsyncGenerator<string> {
   for await (const event of streamRunEventsUntilTerminal(client, runId, options)) {
     const text = textFromAgentResponseEvent(event);
@@ -826,7 +722,7 @@ async function* streamRunTextUntilTerminal(
 async function* streamRunPartsUntilTerminal(
   client: AgentRouterClient,
   runId: string,
-  options: { pollIntervalMs?: number; maxWaitMs?: number } = {}
+  options: StreamWaitOptions = {}
 ): AsyncGenerator<AgentStreamPart> {
   for await (const event of streamRunEventsUntilTerminal(client, runId, options)) {
     const part = streamPartFromRunEvent(event);
@@ -891,10 +787,10 @@ function stringPayload(event: RunEvent, key: string): string | undefined {
 async function* streamRunEventsUntilTerminal(
   client: AgentRouterClient,
   runId: string,
-  options: { pollIntervalMs?: number; maxWaitMs?: number } = {}
+  options: StreamWaitOptions = {}
 ): AsyncGenerator<RunEvent> {
   const { pollIntervalMs = 1000, maxWaitMs = 10 * 60 * 1000 } = options;
-  let afterSeq = 0;
+  let afterSeq = options.afterSeq ?? 0;
   const startedAt = Date.now();
 
   for (;;) {

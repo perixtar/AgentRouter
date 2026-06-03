@@ -227,6 +227,37 @@ describe("AgentRouter TypeScript SDK", () => {
     expect(result.run.id).toBe(turn3RunId); // resumed the NEW turn, not the old run
     expect(result.status).toBe("completed");
     expect(result.text).toBe("added docstring");
+
+    // streamAgent also continues conversations; no separate continueAgent helper.
+    let turn4RunId = "";
+    const stream = await streamAgent({
+      client: sdk,
+      continueRun: run.id,
+      message: "now add a README note",
+      pollIntervalMs: 5,
+      maxWaitMs: 5_000
+    });
+    for (let i = 0; i < 100 && !turn4RunId; i++) {
+      const t = await sdk.getRunTurns(run.id);
+      const turn4 = t.items.find((x) => x.turnNumber === 4);
+      if (turn4) turn4RunId = turn4.runId;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(turn4RunId).not.toBe("");
+    expect(stream.run.id).toBe(turn4RunId);
+    expect(stream.conversationId).toBe(run.id);
+    expect(stream.turnNumber).toBe(4);
+    await completeNextTurn(turn4RunId, "added README note");
+
+    const streamedText: string[] = [];
+    for await (const text of stream.textStream) {
+      streamedText.push(text);
+    }
+    expect(streamedText).toEqual(["added README note"]);
+    await expect(stream.finalResult).resolves.toMatchObject({
+      run: { id: turn4RunId, status: "completed" },
+      text: "added README note"
+    });
   });
 
   it("sends configured default headers", async () => {
@@ -553,7 +584,7 @@ describe("AgentRouter TypeScript SDK", () => {
     expect(sdkModule).not.toHaveProperty("resumeRun");
   });
 
-  it("exposes run-id multi-turn helpers (continueRun/getRunTurns/closeRun/continueAgent)", async () => {
+  it("exposes only run-id multi-turn SDK helpers", async () => {
     const sdkModule = await import("@agentrouterhq/sdk");
     const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
 
@@ -561,8 +592,16 @@ describe("AgentRouter TypeScript SDK", () => {
     expect(typeof sdk.continueRun).toBe("function");
     expect(typeof sdk.getRunTurns).toBe("function");
     expect(typeof sdk.closeRun).toBe("function");
-    // Top-level streaming helper exists.
-    expect(typeof sdkModule.continueAgent).toBe("function");
+    // Top-level continuation is handled by runAgent/streamAgent, not a
+    // separate continueAgent helper.
+    expect(sdkModule).not.toHaveProperty("continueAgent");
+    // Deprecated session endpoints are not part of the public SDK surface.
+    expect(sdk).not.toHaveProperty("createSession");
+    expect(sdk).not.toHaveProperty("getSession");
+    expect(sdk).not.toHaveProperty("sendMessage");
+    expect(sdk).not.toHaveProperty("listSessionEvents");
+    expect(sdk).not.toHaveProperty("streamSession");
+    expect(sdk).not.toHaveProperty("closeSession");
   });
 });
 

@@ -5,7 +5,7 @@ import {
   hasHelpFlag,
   logRunEvent,
   makeExampleClient
-} from "./shared.js";
+} from "../shared.js";
 
 if (hasHelpFlag()) {
   printHelp();
@@ -49,7 +49,7 @@ Prerequisites:
   pnpm dev
 
 Run:
-  pnpm example:claude-code
+  pnpm example:quickstart:claude
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787

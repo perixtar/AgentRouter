@@ -5,7 +5,6 @@ import { Pool } from "pg";
 import {
   agentrouter,
   codex,
-  continueAgent,
   streamAgent,
   type RunEvent
 } from "@agentrouterhq/sdk";
@@ -213,9 +212,9 @@ describeRealE2E("real Codex API + worker E2E", () => {
         ]
       });
 
-      const second = await continueAgent({
+      const second = await streamAgent({
         client: sdk,
-        runId: firstResult.id,
+        continueRun: firstResult.id,
         message:
           "Use the shell tool to run exactly: grep -qx 'AR_CODEX_TURN1_OK' reports/agent-smoke.txt && printf 'AR_CODEX_TURN2_OK\\n' > reports/turn2.txt. Then summarize the result in one sentence.",
         pollIntervalMs: 500,

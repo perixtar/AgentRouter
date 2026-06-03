@@ -7,7 +7,7 @@ import {
   hasHelpFlag,
   logRunEvent,
   makeExampleClient
-} from "./shared.js";
+} from "../shared.js";
 
 const marker = "AR_CODING_AGENT_FILES_OK";
 const expectedFiles = [
@@ -213,7 +213,7 @@ Or run the processes separately:
   pnpm worker:dev
 
 Run:
-  pnpm example:coding-agent-files
+  pnpm example:recipe:artifacts
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787

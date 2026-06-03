@@ -1,85 +1,118 @@
 # Examples
 
-Start the local API and worker:
+The examples are split into two groups:
+
+- `quickstart/`: short examples for the first 10 minutes.
+- `recipes/`: production-style workflows that exercise lifecycle, artifacts,
+  runtime modes, API boundaries, and error handling.
+
+## Setup
+
+Most examples need the API and worker:
 
 ```sh
 pnpm dev
 ```
 
-This keeps the API and worker as separate local processes, but runs both from one command. To run them separately:
+That starts the local API and worker together. To run them separately:
 
 ```sh
 pnpm api:dev
 pnpm worker:dev
 ```
 
-## runAgent
-
-Create a run and print the final agent response:
+API-only recipes are marked below and can run with just:
 
 ```sh
-pnpm example:run-agent
+pnpm api:dev
 ```
 
-Continue an existing conversation (turn 2+) by its run id:
-
-```sh
-AGENTROUTER_CONTINUE_RUN=run_... AGENTROUTER_MESSAGE="add a test" pnpm example:run-agent
-```
-
-## streamAgent
-
-Create a run and stream safe process updates plus final output through `fullStream`:
-
-```sh
-pnpm example:stream-agent
-```
-
-## Claude Code
-
-Create a Claude Code run through the same `runAgent` helper:
-
-```sh
-pnpm example:claude-code
-```
-
-## Coding Agent Files
-
-Run a coding-agent scenario that creates source, test, and docs files in the Daytona sandbox. The example streams progress, restores the final session, downloads R2 artifacts, verifies the workspace file index, and prints every generated file from the workspace patch:
-
-```sh
-pnpm example:coding-agent-files
-```
-
-## Create Tool
-
-Custom user-defined tools are not passed as raw functions into the sandbox in Phase 1. This example defines a tool contract and demonstrates the current typed rejection. It only needs the API server:
-
-```sh
-pnpm example:create-tool
-```
-
-## Existing Minimal SDK Example
-
-```sh
-pnpm example:sdk
-```
-
-To inspect any command without creating a run:
-
-```sh
-pnpm example:run-agent -- --help
-pnpm example:stream-agent -- --help
-pnpm example:claude-code -- --help
-pnpm example:coding-agent-files -- --help
-pnpm example:create-tool -- --help
-```
-
-Optional environment variables:
+Common environment variables:
 
 ```sh
 AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787
 AGENTROUTER_API_KEY=<random-private-token>
 AGENTROUTER_MODEL=gpt-4o
+AGENTROUTER_CLAUDE_MODEL=claude-sonnet-4-6
 AGENTROUTER_TASK="Summarize this repo"
+```
+
+## Quickstarts
+
+| Command | What It Covers |
+| --- | --- |
+| `pnpm example:quickstart:minimal` | Smallest complete TypeScript SDK run |
+| `pnpm example:quickstart:run` | `runAgent`, events, final `result.text` |
+| `pnpm example:quickstart:stream` | `streamAgent`, `fullStream`, terminal result |
+| `pnpm example:quickstart:claude` | Running the same helper through Claude Code |
+
+Recommended first run:
+
+```sh
+pnpm example:quickstart:run
+```
+
+## Recipes
+
+| Command | Requires Worker | What It Covers |
+| --- | --- | --- |
+| `pnpm example:recipe:continue` | Yes | Run-id continuation, sandbox/session reuse, `getRunTurns`, `closeRun` |
+| `pnpm example:recipe:artifacts` | Yes | R2 artifacts, workspace file index, workspace patch, stdout download |
+| `pnpm example:recipe:runtime-modes` | Yes | Codex and Claude Code runtime mode selection |
+| `pnpm example:recipe:low-level` | No | Direct client methods: create, list, events, cancel, get |
+| `pnpm example:recipe:errors` | No | `AgentRouterError` handling for API validation failures |
+| `pnpm example:recipe:tool-boundary` | No | Current custom-tool boundary and future MCP gateway shape |
+
+Most complete end-to-end demo:
+
+```sh
+pnpm example:recipe:artifacts
+```
+
+It runs a coding-agent scenario in a Daytona sandbox, streams progress,
+restores the final session, downloads R2 artifacts, verifies the workspace file
+index, and prints generated files from the workspace patch.
+
+## Runtime Mode Recipe
+
+The runtime-mode recipe defaults to a safe read-only Codex run:
+
+```sh
+pnpm example:recipe:runtime-modes
+```
+
+Choose a specific runtime case:
+
+```sh
+AGENTROUTER_RUNTIME_EXAMPLE=codex-full-access pnpm example:recipe:runtime-modes
+AGENTROUTER_RUNTIME_EXAMPLE=claude-plan pnpm example:recipe:runtime-modes
+```
+
+Available cases are printed by:
+
+```sh
+pnpm example:recipe:runtime-modes -- --help
+```
+
+## Compatibility Aliases
+
+The older script names still work:
+
+```sh
+pnpm example:sdk
+pnpm example:run-agent
+pnpm example:stream-agent
+pnpm example:claude-code
+pnpm example:coding-agent-files
+pnpm example:tool-boundary
+```
+
+## Help
+
+Every example supports `--help`:
+
+```sh
+pnpm example:quickstart:run -- --help
+pnpm example:recipe:continue -- --help
+pnpm example:recipe:errors -- --help
 ```

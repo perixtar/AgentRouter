@@ -117,7 +117,7 @@ AgentRouter can keep a sandbox and provider thread alive after a run finishes.
 The first run id becomes the conversation handle.
 
 ```ts
-import { agentrouter, codex, continueAgent, runAgent } from "@agentrouterhq/sdk";
+import { agentrouter, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
 
 const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
@@ -130,9 +130,9 @@ const firstTurn = await runAgent({
   runtime: codex({ mode: "full_access" })
 });
 
-const secondTurn = await continueAgent({
+const secondTurn = await streamAgent({
   client,
-  runId: firstTurn.id,
+  continueRun: firstTurn.id,
   message: "Now add tests for fib(n)."
 });
 
@@ -208,7 +208,6 @@ Available client methods:
 | `getRunSession` | Get final response, event cursor, and artifact manifest |
 | `listRunArtifacts`, `downloadArtifact` | Inspect and download artifacts |
 | `continueRun`, `getRunTurns`, `closeRun` | Continue or close a run-id conversation |
-| `createSession`, `sendMessage`, `streamSession` | Lower-level session API |
 
 ## Runtime options
 

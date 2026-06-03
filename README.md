@@ -18,19 +18,13 @@ agents from your app, CLI, or CI without rebuilding the orchestration layer.
 
 ## Why AgentRouter
 
-Coding agents are not stateless API calls. They run commands, edit files,
-stream logs, hold session state, and need isolated execution. AgentRouter wraps
-that runtime surface behind a small API and SDK.
+Codex and Claude Code are powerful general-purpose agents, but they are built
+primarily as interactive CLIs. Product teams need something different: a way to
+turn them into custom agents that run from an app, CLI, dashboard, CI job, or
+internal tool.
 
-- Run Codex or Claude Code behind one API.
-- Execute agents inside Daytona sandboxes.
-- Stream run events and restore final results.
-- Persist run state, attempts, sessions, turns, artifacts, and logs.
-- Continue a Codex conversation by run id.
-- Keep model provider keys server-side, outside the general sandbox env.
-- Self-host the API and worker with your own Postgres and R2-compatible storage.
-
-## What You Can Build
+AgentRouter gives developers the runtime layer for that. You define the product
+workflow, such as:
 
 - PR review agents that inspect a diff, run tests, and produce comments.
 - Bug reproduction agents that investigate a failing case in a sandbox.
@@ -39,29 +33,81 @@ that runtime surface behind a small API and SDK.
 - Internal tools that expose Codex or Claude Code as a controlled API.
 - CI workflows that run an agent and collect logs/artifacts.
 
+AgentRouter handles the execution surface around those agents: isolated Daytona
+sandboxes, long-running jobs, streaming progress, sessions, permissions,
+provider keys, logs, generated files, patches, artifacts, and resume behavior.
+The same API and TypeScript SDK can run Codex or Claude Code behind one
+interface.
+
+AgentRouter lets you focus on the agent your users need, not the runtime
+infrastructure required to operate it.
+
 ## Architecture
 
-```txt
-Your app / CLI / CI
-        |
-        v
-AgentRouter API  <---- TypeScript SDK
-        |
-        v
-Postgres run state
-        |
-        v
-AgentRouter worker
-        |
-        v
-Daytona sandbox
-        |
-        v
-Codex CLI or Claude Code
-        |
-        v
-R2 logs and artifacts
+```mermaid
+flowchart LR
+  subgraph Client["Developer Surface"]
+    App["App / CLI / CI"]
+    SDK["TypeScript SDK"]
+    Web["Web dashboard"]
+  end
+
+  subgraph Control["AgentRouter Control Plane"]
+    API["HTTP API"]
+    Auth["Auth + API key resolver"]
+    Policy["Runtime config + permission policy"]
+    Stream["Event stream API"]
+  end
+
+  subgraph State["Durable State"]
+    PG[("Postgres\nruns, attempts, sessions, turns, events")]
+    R2[("R2-compatible storage\nlogs, patches, artifacts, manifests")]
+    Keys[("Encrypted provider keys\nBYOK metadata")]
+  end
+
+  subgraph Runtime["AgentRouter Runtime Plane"]
+    Worker["Worker / job runner"]
+    SandboxCtl["Daytona lifecycle\ncreate, resume, suspend, delete"]
+    Boundary["Credential boundary\nscoped env + leak checks"]
+  end
+
+  subgraph Sandbox["Isolated Sandbox"]
+    Workspace["Scratch workspace"]
+    Adapter["Runtime adapter"]
+    Codex["Codex CLI"]
+    Claude["Claude Code"]
+  end
+
+  App --> SDK --> API
+  Web --> API
+  API --> Auth --> PG
+  API --> Policy --> PG
+  API --> Stream
+  Stream --> PG
+
+  PG --> Worker
+  Worker --> SandboxCtl --> Workspace
+  Worker --> Boundary --> Adapter
+  Adapter --> Codex
+  Adapter --> Claude
+
+  Codex --> Workspace
+  Claude --> Workspace
+  Workspace --> Worker
+  Worker --> PG
+  Worker --> R2
+  Keys --> Boundary
+  Boundary --> Codex
+  Boundary --> Claude
+
+  R2 --> API
+  PG --> API
 ```
+
+The API owns request validation, auth, run creation, idempotency, and streaming.
+The worker owns everything after a run is claimed: sandbox lifecycle, runtime
+launch, credential scoping, event normalization, artifact capture, and cleanup.
+Postgres is the system of record; R2 stores large immutable run artifacts.
 
 This repository contains the self-hosted runtime. Hosted account management,
 dashboard, billing, Cloud API keys, and hosted BYOK storage are intentionally
@@ -177,7 +223,7 @@ console.log(result.text);
 Run the SDK example:
 
 ```sh
-pnpm example:run-agent
+pnpm example:quickstart:run
 ```
 
 ## Multi-Turn Runs
@@ -186,22 +232,24 @@ A run id can become the conversation handle. Start a run, then continue it by
 posting a follow-up message to the same run id.
 
 ```ts
-import { agentrouter, codex, continueAgent } from "@agentrouterhq/sdk";
+import { agentrouter, codex, streamAgent } from "@agentrouterhq/sdk";
 
 const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
   apiKey: process.env.AGENTROUTER_API_KEY!
 });
 
-const run = await client.createRun({
+const turn1 = await streamAgent({
+  client,
   task: "Create src/fib.ts with a fib(n) function.",
   runtime: codex({ mode: "full_access" })
 });
 
 // After the first run completes within the continuation grace window:
-const turn2 = await continueAgent({
+const firstResult = await turn1.finalResult;
+const turn2 = await streamAgent({
   client,
-  runId: run.id,
+  continueRun: firstResult.id,
   message: "Now add tests for fib(n)."
 });
 
@@ -216,19 +264,30 @@ the full SDK surface.
 
 ## Examples
 
+Quickstarts:
+
 ```sh
-pnpm example:run-agent
-pnpm example:stream-agent
-pnpm example:claude-code
-pnpm example:coding-agent-files
-pnpm example:tool-boundary
-pnpm example:sdk
+pnpm example:quickstart:minimal
+pnpm example:quickstart:run
+pnpm example:quickstart:stream
+pnpm example:quickstart:claude
 ```
 
-The most complete demo today is:
+Recipes:
 
 ```sh
-pnpm example:coding-agent-files
+pnpm example:recipe:continue
+pnpm example:recipe:artifacts
+pnpm example:recipe:runtime-modes
+pnpm example:recipe:low-level
+pnpm example:recipe:errors
+pnpm example:recipe:tool-boundary
+```
+
+The most complete end-to-end demo is:
+
+```sh
+pnpm example:recipe:artifacts
 ```
 
 It runs a coding-agent scenario in a Daytona sandbox, streams progress,

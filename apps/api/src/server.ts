@@ -11,7 +11,6 @@ import {
   type EventRecord,
   type RunRecord,
   type SessionRecord,
-  type TurnRecord,
   withSearchPath
 } from "@agentrouter/db";
 import type { AgentResponse, RuntimePermissionValue } from "@agentrouter/core";
@@ -68,14 +67,7 @@ const createRunSchema = z.strictObject({
   metadata: z.record(z.string(), z.unknown()).optional()
 });
 
-// Multi-turn sessions are Codex-only for M4.
-const createSessionSchema = z.strictObject({
-  runtime: codexRuntimeSchema.default({ kind: "codex", mode: "full_access" }),
-  title: z.string().trim().max(200).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional()
-});
-
-const sessionMessageSchema = z.strictObject({
+const conversationMessageSchema = z.strictObject({
   message: z.string().trim().min(1).max(120_000)
 });
 
@@ -384,11 +376,11 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
 
   // Continue a conversation by run id. Resolves the run to its session (a
   // grace-eligible run was promoted to one when it finished); enqueues the next
-  // turn using the same hardened atomic turn+run logic as /v1/sessions.
+  // turn with hardened atomic turn+run creation.
   server.post("/v1/runs/:runId/messages", async (request, reply) => {
     const { runId } = runParams(request);
     const orgId = orgOf(request);
-    const parsed = sessionMessageSchema.parse(request.body);
+    const parsed = conversationMessageSchema.parse(request.body);
 
     const outcome = await withClient(input, async (client) => {
       await client.query("begin");
@@ -521,191 +513,14 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
     return reply.send(bytes);
   });
 
-  // ── Multi-turn sessions (M4) — DEPRECATED, Codex-only, org-scoped. ──
-  //
-  // DEPRECATED: the conversation surface is now keyed off the run id
-  // (`POST /v1/runs`, `POST /v1/runs/:id/messages`, `GET /v1/runs/:id/turns`,
-  // `POST /v1/runs/:id/close`). These `/v1/sessions*` routes remain mounted and
-  // fully functional for backward compatibility (the web no longer calls them);
-  // they are slated for removal in a later milestone. New callers MUST use the
-  // run-id surface. Every `/v1/sessions*` response carries a `Deprecation` header.
-  server.addHook("onSend", async (request, reply, payload) => {
-    if (request.url.startsWith("/v1/sessions")) {
-      reply.header("Deprecation", "true");
-      reply.header(
-        "Link",
-        '</v1/runs/:id/messages>; rel="successor-version"; title="run-id multi-turn"'
-      );
-    }
-    return payload;
-  });
-
-  server.post("/v1/sessions", async (request, reply) => {
-    const orgId = orgOf(request);
-    const parsed = createSessionSchema.parse(request.body ?? {});
-    const sessionId = `sess_${randomUUID()}`;
-    const session = await withRepository(input, async (repo) =>
-      repo.createSession({
-        id: sessionId,
-        orgId,
-        runtimeKind: "codex",
-        runtimeMode: parsed.runtime.mode,
-        runtimeModel: parsed.runtime.model,
-        title: parsed.title
-      })
-    );
-    reply.status(201);
-    return sessionToApi(session);
-  });
-
-  server.get("/v1/sessions", async (request) => {
-    const orgId = orgOf(request);
-    const sessions = await withRepository(input, async (repo) => repo.listSessions(orgId));
-    return { items: sessions.map(sessionToApi) };
-  });
-
-  server.get("/v1/sessions/:sessionId", async (request) => {
-    const orgId = orgOf(request);
-    const { sessionId } = sessionParams(request);
-    const result = await withRepository(input, async (repo) => {
-      const session = await repo.getSession(sessionId, orgId);
-      if (!session) return undefined;
-      const turns = await repo.listTurns(sessionId, orgId);
-      return { session, turns };
-    });
-    if (!result) throw new ApiError(404, "session_not_found", "Session not found");
-    return {
-      ...sessionToApi(result.session),
-      turns: result.turns.map(turnToApi)
-    };
-  });
-
-  server.post("/v1/sessions/:sessionId/messages", async (request, reply) => {
-    const orgId = orgOf(request);
-    const { sessionId } = sessionParams(request);
-    const parsed = sessionMessageSchema.parse(request.body);
-
-    // Atomic: the turn row + run row are created in ONE transaction so a
-    // turn-number collision (or any error) rolls back BOTH — never an orphan
-    // run that the worker would pick up untracked. (Shared with /v1/runs/:id/messages.)
-    const result = await withClient(input, async (client) => {
-      await client.query("begin");
-      try {
-        const repo = new RunRepository(client);
-        const session = await repo.getSession(sessionId, orgId);
-        if (!session) {
-          await client.query("rollback");
-          return { error: "not_found" as const };
-        }
-        const turn = await enqueueTurn(repo, session, orgId, parsed.message);
-        if ("error" in turn) {
-          await client.query("rollback");
-          return turn;
-        }
-        await client.query("commit");
-        return turn;
-      } catch (error) {
-        await client.query("rollback");
-        throw error;
-      }
-    });
-
-    if ("error" in result) {
-      if (result.error === "not_found") throw new ApiError(404, "session_not_found", "Session not found");
-      if (result.error === "closed") throw new ApiError(409, "session_closed", "Session is closed");
-      throw new ApiError(409, "session_busy", "A turn is already in progress for this session");
-    }
-
-    reply.status(202);
-    return { runId: result.runId, turnNumber: result.turnNumber, sessionId };
-  });
-
-  server.get("/v1/sessions/:sessionId/events", async (request) => {
-    const orgId = orgOf(request);
-    const { sessionId } = sessionParams(request);
-    const query = z
-      .object({
-        runId: z.string().optional(),
-        afterSeq: z.coerce.bigint().default(0n),
-        limit: z.coerce.number().int().positive().max(500).default(200)
-      })
-      .parse(request.query);
-
-    const data = await withRepository(input, async (repo) => {
-      const session = await repo.getSession(sessionId, orgId);
-      if (!session) return undefined;
-      const turns = await repo.listTurns(sessionId, orgId);
-      const runId = query.runId ?? turns.at(-1)?.runId;
-      if (!runId) return { session, runId: undefined, events: [], run: undefined };
-      const run = await repo.getRun(runId, orgId);
-      const events = await repo.listEvents({ runId, orgId, afterSeq: query.afterSeq, limit: query.limit });
-      return { session, runId, run, events };
-    });
-    if (!data) throw new ApiError(404, "session_not_found", "Session not found");
-
-    const lastEvent = data.events.at(-1);
-    return {
-      sessionId,
-      runId: data.runId,
-      status: data.run?.status,
-      failure:
-        data.run?.failureCode || data.run?.failureReason
-          ? { code: data.run?.failureCode, reason: data.run?.failureReason }
-          : undefined,
-      items: data.events.map(eventToApi),
-      nextAfterSeq: lastEvent ? Number(lastEvent.sequence) : Number(query.afterSeq)
-    };
-  });
-
-  server.get("/v1/sessions/:sessionId/stream", async (request, reply) => {
-    const orgId = orgOf(request);
-    const { sessionId } = sessionParams(request);
-    const data = await withRepository(input, async (repo) => {
-      const session = await repo.getSession(sessionId, orgId);
-      if (!session) return undefined;
-      const turns = await repo.listTurns(sessionId, orgId);
-      const runId = turns.at(-1)?.runId;
-      const events = runId
-        ? await repo.listEvents({ runId, orgId, afterSeq: 0n, limit: 500 })
-        : [];
-      return { events };
-    });
-    if (!data) throw new ApiError(404, "session_not_found", "Session not found");
-
-    reply.raw.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive"
-    });
-    if (data.events.length === 0) {
-      reply.raw.write("event: heartbeat\ndata: {}\n\n");
-    } else {
-      for (const event of data.events) reply.raw.write(sseEvent(event));
-    }
-    reply.raw.end();
-  });
-
-  server.post("/v1/sessions/:sessionId/close", async (request) => {
-    const orgId = orgOf(request);
-    const { sessionId } = sessionParams(request);
-    const session = await withRepository(input, async (repo) => repo.closeSession(sessionId, orgId));
-    if (!session) throw new ApiError(404, "session_not_found", "Session not found");
-    return sessionToApi(session);
-  });
-
   return server;
-}
-
-function sessionParams(request: FastifyRequest): { sessionId: string } {
-  return z.object({ sessionId: z.string().min(1) }).parse(request.params);
 }
 
 /**
  * Atomically enqueues the next turn of a conversation: concurrency-guards the
  * session, derives the turn number from the actual turns (max+1), creates the
  * turn row then the run (turn-first so a UNIQUE collision rolls back before any
- * run is enqueued). MUST run inside a transaction owned by the caller. Shared by
- * /v1/sessions/:id/messages and /v1/runs/:id/messages so there's one hardened path.
+ * run is enqueued). MUST run inside a transaction owned by the caller.
  */
 async function enqueueTurn(
   repo: RunRepository,
@@ -842,29 +657,6 @@ function orgOf(request: FastifyRequest): string {
     throw new ApiError(401, "unauthorized", "Missing authentication context");
   }
   return orgId;
-}
-
-function sessionToApi(session: SessionRecord): Record<string, unknown> {
-  return {
-    id: session.id,
-    runtime: runtimeToApi(session.runtimeKind, session.runtimeMode, session.runtimeModel),
-    title: session.title,
-    status: session.status,
-    sandboxState: session.sandboxState,
-    turnCount: session.turnCount,
-    createdAt: session.createdAt.toISOString(),
-    lastActiveAt: session.lastActiveAt.toISOString()
-  };
-}
-
-function turnToApi(turn: TurnRecord): Record<string, unknown> {
-  return {
-    id: turn.id,
-    runId: turn.runId,
-    turnNumber: turn.turnNumber,
-    prompt: turn.prompt,
-    createdAt: turn.createdAt.toISOString()
-  };
 }
 
 function runToApi(

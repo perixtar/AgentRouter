@@ -86,7 +86,7 @@ Or run the processes separately:
   pnpm worker:dev
 
 Run:
-  pnpm example:sdk
+  pnpm example:quickstart:minimal
 
 Optional env:
   AGENTROUTER_API_BASE_URL=http://127.0.0.1:8787
