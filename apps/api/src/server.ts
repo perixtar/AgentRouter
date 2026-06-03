@@ -1,7 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import Fastify, {
   type FastifyInstance,
-  type FastifyReply,
   type FastifyRequest
 } from "fastify";
 import type { Pool, PoolClient } from "pg";
@@ -15,25 +14,12 @@ import {
   type TurnRecord,
   withSearchPath
 } from "@agentrouter/db";
-import { encrypt, lastFour } from "@agentrouter/secret-box";
 import type { AgentResponse, RuntimePermissionValue } from "@agentrouter/core";
 
 export interface BuildApiServerInput {
   pool: Pool;
   schema: string;
   apiKey: string;
-  /**
-   * Shared web→API service token. When the request's bearer equals this, the
-   * asserted `X-AR-Org-Id` header is trusted as the org (the Next.js web server
-   * path). External SDK customers instead present an `ar_live_…` key.
-   */
-  webServiceToken?: string;
-  /**
-   * Base64 master key for BYOK envelope encryption. Required for the
-   * /v1/provider-keys endpoints (the only place plaintext is handled). Falls
-   * back to AGENTROUTER_MASTER_KEY in the env when omitted.
-   */
-  masterKey?: string;
   artifactBytes?: {
     getObjectBytes(key: string): Promise<Buffer>;
   };
@@ -80,18 +66,6 @@ const createRunSchema = z.strictObject({
   task: z.string().trim().min(1).max(120_000),
   runtime: runtimeSchema.default({ kind: "codex", mode: "default" }),
   metadata: z.record(z.string(), z.unknown()).optional()
-});
-
-// BYOK: OpenAI keys are `sk-…` (incl. `sk-proj-…`). Trim + format-validate so
-// an obvious paste error fails fast before it is encrypted.
-const providerKeySchema = z.strictObject({
-  provider: z.enum(["openai", "anthropic"]).default("openai"),
-  key: z
-    .string()
-    .trim()
-    .min(20)
-    .max(400)
-    .regex(/^sk-[A-Za-z0-9_-]+$/, "Expected an OpenAI key starting with 'sk-'")
 });
 
 // Multi-turn sessions are Codex-only for M4.
@@ -547,65 +521,6 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
     return reply.send(bytes);
   });
 
-  // ── BYOK provider keys (M3) — the only place plaintext is handled. ──
-
-  server.post("/v1/provider-keys", async (request, reply) => {
-    const orgId = orgOf(request);
-    const body = providerKeySchema.parse(request.body);
-
-    const masterKey = input.masterKey ?? process.env.AGENTROUTER_MASTER_KEY;
-    if (!masterKey) {
-      throw new ApiError(
-        503,
-        "byok_unconfigured",
-        "Provider key encryption is not configured (missing master key)"
-      );
-    }
-
-    const enc = encrypt(body.key, masterKey);
-    await withRepository(input, async (repo) =>
-      repo.upsertProviderKey({
-        orgId,
-        provider: body.provider,
-        ciphertext: enc.ciphertext,
-        iv: enc.iv,
-        tag: enc.tag,
-        last4: lastFour(body.key),
-        keyVersion: enc.keyVersion
-      })
-    );
-
-    reply.status(201);
-    return { provider: body.provider, last4: lastFour(body.key), connected: true };
-  });
-
-  server.get("/v1/provider-keys", async (request) => {
-    const orgId = orgOf(request);
-    const statuses = await withRepository(input, async (repo) =>
-      repo.getProviderKeyStatus(orgId)
-    );
-    return {
-      items: statuses.map((s) => ({
-        provider: s.provider,
-        last4: s.last4,
-        connected: true,
-        updatedAt: s.updatedAt.toISOString()
-      }))
-    };
-  });
-
-  server.delete("/v1/provider-keys/:provider", async (request) => {
-    const orgId = orgOf(request);
-    const { provider } = z
-      .object({ provider: z.enum(["openai", "anthropic"]) })
-      .parse(request.params);
-    const deleted = await withRepository(input, async (repo) =>
-      repo.deleteProviderKey(orgId, provider)
-    );
-    if (!deleted) throw new ApiError(404, "provider_key_not_found", "No provider key to delete");
-    return { provider, connected: false };
-  });
-
   // ── Multi-turn sessions (M4) — DEPRECATED, Codex-only, org-scoped. ──
   //
   // DEPRECATED: the conversation surface is now keyed off the run id
@@ -867,59 +782,16 @@ async function authenticate(
   }
   const bearer = authorization.slice("Bearer ".length).trim();
 
-  // (a) Legacy/admin single key — keeps existing tests + tooling working.
-  // Resolves to a fixed system org so its runs are still tenant-scoped.
+  // Self-hosted auth: one configured bearer token for all local clients.
   if (timingSafeEqualStr(bearer, input.apiKey)) {
-    const orgId = assertedOrgId(request) ?? SYSTEM_ORG_ID;
-    return { orgId };
+    return { orgId: SYSTEM_ORG_ID };
   }
 
-  // (b) Web service token — trust the asserted X-AR-Org-Id (the web path).
-  // Falls back to the env var so the token can be supplied without changing
-  // the server bootstrap.
-  const webServiceToken = input.webServiceToken ?? process.env.AGENTROUTER_WEB_SERVICE_TOKEN;
-  if (webServiceToken && timingSafeEqualStr(bearer, webServiceToken)) {
-    const orgId = assertedOrgId(request);
-    if (!orgId) {
-      throw new ApiError(401, "unauthorized", "Web service token requires an X-AR-Org-Id header");
-    }
-    return { orgId };
-  }
-
-  // (c) External SDK key (ar_live_…) — hash → api_keys row → org_id.
-  const keyHash = hashString(bearer);
-  const orgId = await withClient(input, async (client) => {
-    const result = await client.query<{ org_id: string }>(
-      `select org_id from api_keys where key_hash = $1 and revoked_at is null limit 1`,
-      [keyHash]
-    );
-    return result.rows[0]?.org_id;
-  });
-
-  if (!orgId) {
-    throw new ApiError(401, "unauthorized", "Missing or invalid bearer token");
-  }
-
-  // Best-effort last-used touch (non-blocking correctness; ignore errors).
-  await withClient(input, async (client) => {
-    await client.query(
-      `update api_keys set last_used_at = now() where key_hash = $1`,
-      [keyHash]
-    );
-  }).catch(() => undefined);
-
-  return { orgId };
+  throw new ApiError(401, "unauthorized", "Missing or invalid bearer token");
 }
 
-/** Fixed org for the legacy admin `AGENTROUTER_API_KEY` path. */
+/** Fixed org for the self-hosted `AGENTROUTER_API_KEY` path. */
 const SYSTEM_ORG_ID = "org_system";
-
-function assertedOrgId(request: FastifyRequest): string | undefined {
-  const header = request.headers["x-ar-org-id"];
-  const value = Array.isArray(header) ? header[0] : header;
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  return trimmed.length > 0 ? trimmed : undefined;
-}
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   const bufA = Buffer.from(a);

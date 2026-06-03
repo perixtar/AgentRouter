@@ -33,7 +33,6 @@ const workerInput = {
   testResourcePrefix: config.testResourcePrefix,
   codexApiKey: config.codexApiKey,
   anthropicApiKey: config.anthropicApiKey,
-  masterKey: config.masterKey,
   // Multi-turn run lifecycle / sandbox reclaim TTLs (env-tunable via config).
   oneShotGraceMinutes: config.oneShotGraceMinutes,
   sessionIdleTtlMinutes: config.sessionIdleTtlMinutes,

@@ -148,12 +148,10 @@ describe("worker run-one orchestration", () => {
     }
   }, 60_000);
 
-  it("completes a legacy/system org Codex run on the global key without a uuid BYOK lookup", async () => {
-    // Regression: the legacy admin path (raw AGENTROUTER_API_KEY, no X-AR-Org-Id)
-    // resolves to the "org_system" sentinel. That is NOT a uuid, so it must not
-    // hit the provider_keys (org_id uuid) BYOK lookup — which would raise
-    // `invalid input syntax for type uuid: "org_system"` and fail the run — and
-    // must stay ephemeral (delete-on-finish, global key), exactly as pre-BYOK.
+  it("completes a self-hosted system org Codex run on the configured provider key", async () => {
+    // The self-hosted API key path resolves to the "org_system" sentinel. It
+    // keeps the simple delete-on-finish lifecycle and uses the configured
+    // provider key from the worker environment.
     const systemRunId = `run_${randomUUID()}`;
     const systemSandbox = new RecordingSandboxDriver();
 
@@ -190,8 +188,8 @@ describe("worker run-one orchestration", () => {
     });
 
     expect(result).toEqual({ processed: true, runId: systemRunId });
-    // full_access would be grace-eligible for a REAL org; a system org must NOT
-    // be parked as a session — the one-shot sandbox is deleted on finish.
+    // full_access can be grace-eligible for UUID tenants; a system org keeps the
+    // simple one-shot lifecycle, so the sandbox is deleted on finish.
     expect(systemSandbox.deletedSandboxIds).toEqual(["sandbox_1"]);
 
     const client = await pool.connect();

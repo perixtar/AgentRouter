@@ -229,7 +229,7 @@ describe("AgentRouter TypeScript SDK", () => {
     expect(result.text).toBe("added docstring");
   });
 
-  it("sends the X-AR-Org-Id header when constructed with orgId", async () => {
+  it("sends configured default headers", async () => {
     const seen: Array<Record<string, string>> = [];
     const recordingFetch: typeof fetch = async (input, init) => {
       seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
@@ -238,12 +238,12 @@ describe("AgentRouter TypeScript SDK", () => {
     const sdk = agentrouter({
       baseUrl,
       apiKey: config.apiKey,
-      orgId: "org_system",
+      defaultHeaders: { "x-agentrouter-test": "yes" },
       fetchImpl: recordingFetch
     });
     await sdk.listRuns({ limit: 1 });
     expect(seen.length).toBeGreaterThan(0);
-    expect(seen[0]?.["x-ar-org-id"]).toBe("org_system");
+    expect(seen[0]?.["x-agentrouter-test"]).toBe("yes");
   });
 
   it("closeRun closes a conversation by run id", async () => {

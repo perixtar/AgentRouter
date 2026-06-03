@@ -51,64 +51,7 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
   await client.query(`create schema if not exists ${quoteIdent(schema)}`);
 
   await withSearchPath(client, schema, async () => {
-    // ── Tenancy (M1): orgs, profiles, api_keys ──
-    await client.query(`
-      create table if not exists orgs (
-        id uuid primary key default gen_random_uuid(),
-        name text not null,
-        created_at timestamptz not null default now()
-      )
-    `);
-
-    await client.query(`
-      create table if not exists profiles (
-        user_id uuid primary key,
-        org_id uuid not null references orgs(id),
-        email text not null,
-        created_at timestamptz not null default now()
-      )
-    `);
-
-    await client.query(`
-      create table if not exists api_keys (
-        id uuid primary key default gen_random_uuid(),
-        org_id uuid not null references orgs(id),
-        name text not null,
-        prefix text not null,
-        key_hash text not null unique,
-        scopes text[] not null default '{}',
-        last_used_at timestamptz,
-        revoked_at timestamptz,
-        created_at timestamptz not null default now()
-      )
-    `);
-
-    await client.query(
-      "create index if not exists profiles_org_id_idx on profiles(org_id)"
-    );
-    await client.query(
-      "create index if not exists api_keys_org_id_idx on api_keys(org_id)"
-    );
-
-    // ── BYOK (M3): provider_keys — encrypted at rest (AES-256-GCM). ──
-    await client.query(`
-      create table if not exists provider_keys (
-        id uuid primary key default gen_random_uuid(),
-        org_id uuid not null references orgs(id),
-        provider text not null,
-        key_ciphertext bytea not null,
-        key_iv bytea not null,
-        key_tag bytea not null,
-        key_last4 text not null,
-        master_key_version integer not null default 1,
-        created_at timestamptz not null default now(),
-        updated_at timestamptz not null default now(),
-        unique (org_id, provider)
-      )
-    `);
-
-    // ── Multi-turn (M4): sessions own a persistent sandbox; turns map a user
-    //    message → a run. ──
+    // Sessions own a persistent sandbox; turns map a user message to a run.
     await client.query(`
       create table if not exists sessions (
         id text primary key,
@@ -313,7 +256,7 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
     await client.query("create index if not exists artifacts_run_id_idx on artifacts(run_id)");
     await client.query("alter table runs add column if not exists runtime_model text");
     await client.query("alter table run_attempts add column if not exists runtime_model text");
-    // ── M2: tenant scoping on runtime tables (additive, nullable) ──
+    // Self-hosted runs are scoped to a fixed system org at the API boundary.
     await client.query("alter table runs add column if not exists org_id text");
     await client.query("alter table run_attempts add column if not exists org_id text");
     await client.query("create index if not exists runs_org_id_idx on runs(org_id)");
@@ -918,134 +861,6 @@ export class RunRepository {
     return result.rows[0] ? mapArtifact(result.rows[0]) : undefined;
   }
 
-  // ── BYOK provider keys (M3) ──
-  // Plaintext never touches these methods — only encrypted material in, and
-  // (for the worker) encrypted material out to be decrypted with the master key.
-
-  async upsertProviderKey(input: {
-    orgId: string;
-    provider: string;
-    ciphertext: Buffer;
-    iv: Buffer;
-    tag: Buffer;
-    last4: string;
-    keyVersion: number;
-  }): Promise<void> {
-    await this.client.query(
-      `
-        insert into provider_keys
-          (org_id, provider, key_ciphertext, key_iv, key_tag, key_last4, master_key_version)
-        values ($1, $2, $3, $4, $5, $6, $7)
-        on conflict (org_id, provider) do update set
-          key_ciphertext = excluded.key_ciphertext,
-          key_iv = excluded.key_iv,
-          key_tag = excluded.key_tag,
-          key_last4 = excluded.key_last4,
-          master_key_version = excluded.master_key_version,
-          updated_at = now()
-      `,
-      [
-        input.orgId,
-        input.provider,
-        input.ciphertext,
-        input.iv,
-        input.tag,
-        input.last4,
-        input.keyVersion
-      ]
-    );
-  }
-
-  /** Returns the encrypted row for the worker to decrypt, or undefined. */
-  async getProviderKey(
-    orgId: string,
-    provider: string
-  ): Promise<ProviderKeyRecord | undefined> {
-    const result = await this.client.query(
-      `
-        select org_id, provider, key_ciphertext, key_iv, key_tag, key_last4, master_key_version
-        from provider_keys
-        where org_id = $1 and provider = $2
-      `,
-      [orgId, provider]
-    );
-    return result.rows[0] ? mapProviderKey(result.rows[0]) : undefined;
-  }
-
-  /** Connection status for the UI — last4 only, never the secret. */
-  async getProviderKeyStatus(orgId: string): Promise<ProviderKeyStatus[]> {
-    const result = await this.client.query(
-      `
-        select provider, key_last4, updated_at
-        from provider_keys
-        where org_id = $1
-        order by provider asc
-      `,
-      [orgId]
-    );
-    return result.rows.map((row) => ({
-      provider: String(row.provider),
-      last4: String(row.key_last4),
-      updatedAt: row.updated_at as Date
-    }));
-  }
-
-  async deleteProviderKey(orgId: string, provider: string): Promise<boolean> {
-    const result = await this.client.query(
-      `delete from provider_keys where org_id = $1 and provider = $2`,
-      [orgId, provider]
-    );
-    return (result.rowCount ?? 0) > 0;
-  }
-
-  // ── AgentRouter API keys (M3) ──
-  // The web server can manage these directly (no master key needed — only a
-  // sha256 hash is stored).
-
-  async createApiKey(input: {
-    orgId: string;
-    name: string;
-    prefix: string;
-    keyHash: string;
-    scopes: string[];
-  }): Promise<ApiKeyRecord> {
-    const result = await this.client.query(
-      `
-        insert into api_keys (org_id, name, prefix, key_hash, scopes)
-        values ($1, $2, $3, $4, $5)
-        returning id, name, prefix, scopes, last_used_at, revoked_at, created_at
-      `,
-      [input.orgId, input.name, input.prefix, input.keyHash, input.scopes]
-    );
-    return mapApiKey(result.rows[0]);
-  }
-
-  async listApiKeys(orgId: string): Promise<ApiKeyRecord[]> {
-    const result = await this.client.query(
-      `
-        select id, name, prefix, scopes, last_used_at, revoked_at, created_at
-        from api_keys
-        where org_id = $1
-        order by created_at desc
-      `,
-      [orgId]
-    );
-    return result.rows.map(mapApiKey);
-  }
-
-  /** Soft-revoke (sets revoked_at). Org-scoped. Returns false if not found. */
-  async revokeApiKey(orgId: string, id: string): Promise<boolean> {
-    const result = await this.client.query(
-      `
-        update api_keys
-        set revoked_at = now()
-        where id = $1 and org_id = $2 and revoked_at is null
-      `,
-      [id, orgId]
-    );
-    return (result.rowCount ?? 0) > 0;
-  }
-
   // ── Multi-turn sessions (M4) — all org-scoped. ──
 
   async createSession(input: {
@@ -1442,56 +1257,6 @@ function mapTurn(row: Record<string, unknown>): TurnRecord {
     runId: String(row.run_id),
     turnNumber: Number(row.turn_number),
     prompt: String(row.prompt),
-    createdAt: row.created_at as Date
-  };
-}
-
-export interface ProviderKeyRecord {
-  orgId: string;
-  provider: string;
-  ciphertext: Buffer;
-  iv: Buffer;
-  tag: Buffer;
-  last4: string;
-  keyVersion: number;
-}
-
-export interface ProviderKeyStatus {
-  provider: string;
-  last4: string;
-  updatedAt: Date;
-}
-
-export interface ApiKeyRecord {
-  id: string;
-  name: string;
-  prefix: string;
-  scopes: string[];
-  lastUsedAt?: Date;
-  revokedAt?: Date;
-  createdAt: Date;
-}
-
-function mapProviderKey(row: Record<string, unknown>): ProviderKeyRecord {
-  return {
-    orgId: String(row.org_id),
-    provider: String(row.provider),
-    ciphertext: row.key_ciphertext as Buffer,
-    iv: row.key_iv as Buffer,
-    tag: row.key_tag as Buffer,
-    last4: String(row.key_last4),
-    keyVersion: Number(row.master_key_version)
-  };
-}
-
-function mapApiKey(row: Record<string, unknown>): ApiKeyRecord {
-  return {
-    id: String(row.id),
-    name: String(row.name),
-    prefix: String(row.prefix),
-    scopes: Array.isArray(row.scopes) ? (row.scopes as string[]) : [],
-    lastUsedAt: optionalDate(row.last_used_at),
-    revokedAt: optionalDate(row.revoked_at),
     createdAt: row.created_at as Date
   };
 }

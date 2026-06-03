@@ -1,34 +1,94 @@
 # AgentRouter
 
-Phase 1 runtime control plane for launching coding agents in Daytona sandboxes, storing run state in Postgres, and archiving logs/session artifacts in Cloudflare R2.
+Open-source runtime for running Claude Code and Codex agents in sandboxes.
 
-Design docs live in `docs/`, including `docs/phase1-runtime-plan.html`.
+AgentRouter gives you the backend pieces for coding agents: an API, worker,
+sandbox lifecycle, streaming events, persisted run state, artifacts, and a
+TypeScript SDK. Bring your own OpenAI or Anthropic key and run agents from your
+app, CLI, or CI without rebuilding the runtime loop.
 
-## Phase 1 Quickstart
+> Status: alpha. The runtime works, but the first-launch developer experience is
+> still being tightened. Expect rough edges around setup and external service
+> credentials.
 
-1. Fill `.env` from `.env.example` with real Daytona, OpenAI/Codex, Anthropic/Claude Code, Postgres, and R2 credentials. Set `AGENTROUTER_API_KEY` to a private random bearer token; the API refuses the old example default.
-2. Install dependencies:
+## What You Can Build
+
+- PR review agents that clone a repo, inspect a diff, run tests, and produce comments.
+- Bug reproduction agents that run a failing scenario in an isolated sandbox.
+- Test-fixing agents that generate patches and archive workspace artifacts.
+- Release, dependency-upgrade, and repo-documentation agents.
+- Internal tools that call Claude Code or Codex through one runtime API.
+
+## How It Works
+
+```txt
+Your app / CI / CLI
+  -> AgentRouter API
+  -> Postgres run state
+  -> Worker
+  -> Daytona sandbox
+  -> Codex CLI or Claude Code
+  -> R2 logs and artifacts
+```
+
+AgentRouter does not include model usage. You use your own provider keys:
+
+- `OPENAI_API_KEY` or `CODEX_API_KEY` for Codex.
+- `ANTHROPIC_API_KEY` for Claude Code.
+
+## Quickstart
+
+### 1. Install
 
 ```sh
 pnpm install
 ```
 
-3. Start the local control plane and worker:
+### 2. Configure Environment
+
+Copy the example environment file:
+
+```sh
+cp .env.example .env
+```
+
+Fill in the required values:
+
+```sh
+AGENTROUTER_API_KEY=ar_local_dev_secret
+DATABASE_URL=postgres://...
+DAYTONA_API_KEY=...
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+R2_ACCOUNT_ID=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET=...
+R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+```
+
+For local-only tests, you can use placeholder provider and R2 values. Live
+sandbox runs require real Daytona and provider credentials.
+
+### 3. Run The API And Worker
 
 ```sh
 pnpm dev
 ```
 
-This starts the API and worker as separate local processes. The API accepts run requests; the worker claims queued runs, creates Daytona sandboxes, and launches Codex or Claude Code inside them.
+This starts:
 
-If you need to run them separately:
+- API server on `http://127.0.0.1:8787`
+- Worker process that claims queued runs and starts sandboxes
+
+Run them separately when debugging:
 
 ```sh
 pnpm api:dev
 pnpm worker:dev
 ```
 
-4. Create a run through the API:
+### 4. Create A Codex Run
 
 ```sh
 curl -sS http://127.0.0.1:8787/v1/runs \
@@ -36,93 +96,137 @@ curl -sS http://127.0.0.1:8787/v1/runs \
   -H "Content-Type: application/json" \
   -d '{
     "task": "Reply exactly AR_CODEX_OK",
-    "runtime": { "kind": "codex", "mode": "default", "model": "gpt-4o" }
+    "runtime": {
+      "kind": "codex",
+      "mode": "default",
+      "model": "gpt-4o"
+    }
   }'
 ```
 
-Use `pnpm worker:run-once` to process a single queued run, or `pnpm test:e2e:codex` to run the live SDK -> API -> worker -> Daytona -> Codex -> R2 smoke test. The live file-creation smoke uses `runtime.mode = "full_access"` because Daytona is the outer sandbox; Codex `workspace-write` can hit nested sandbox restrictions in the default Daytona image.
+Process one queued run:
 
-For the TypeScript SDK happy path, use `runAgent()` and read `result.text`:
+```sh
+pnpm worker:run-once
+```
+
+## TypeScript SDK
+
+Use the workspace SDK while developing locally:
 
 ```ts
-const result = await runAgent({ client, task: "Reply exactly AR_CODEX_OK" });
+import { agentrouter, codex, runAgent } from "@agentrouter/sdk";
+
+const client = agentrouter({
+  baseUrl: "http://127.0.0.1:8787",
+  apiKey: process.env.AGENTROUTER_API_KEY!
+});
+
+const result = await runAgent({
+  client,
+  task: "Reply exactly AR_CODEX_OK",
+  runtime: codex({ mode: "default", model: "gpt-4o" })
+});
+
 console.log(result.text);
 ```
 
-Claude Code uses the same run contract:
+Run the example:
 
 ```sh
-pnpm example:claude-code
-pnpm test:e2e:claude
+pnpm example:run-agent
 ```
 
-`pnpm test:e2e:claude` requires a funded `ANTHROPIC_API_KEY`; otherwise the run reaches Claude Code in Daytona and fails with Anthropic's billing error.
+## Examples
+
+```sh
+pnpm example:run-agent
+pnpm example:stream-agent
+pnpm example:claude-code
+pnpm example:coding-agent-files
+pnpm example:tool-boundary
+```
+
+The most complete demo today is:
+
+```sh
+pnpm example:coding-agent-files
+```
+
+It runs a coding-agent scenario in a Daytona sandbox, streams progress, restores
+the final session, downloads R2 artifacts, verifies the workspace file index,
+and prints generated files from the workspace patch.
+
+## Packages
+
+| Package | Purpose |
+| --- | --- |
+| `@agentrouter/sdk` | TypeScript client and helpers for creating and streaming runs |
+| `@agentrouter/core` | Shared run state, event normalization, and provider output parsing |
+| `@agentrouter/api` | Fastify API server for run creation, sessions, files, and events |
+| `@agentrouter/worker` | Worker loop that claims runs and executes them in sandboxes |
+| `@agentrouter/runtime-codex-cli` | Codex CLI runtime adapter |
+| `@agentrouter/runtime-claude-code` | Claude Code runtime adapter |
+| `@agentrouter/sandbox-daytona` | Daytona sandbox driver |
+| `@agentrouter/db` | Postgres schema and repository helpers |
+| `@agentrouter/artifacts-r2` | R2 artifact storage |
+| `@agentrouter/openapi` | OpenAPI contract |
 
 ## Test Commands
 
+Local checks:
+
 ```sh
-pnpm test
+pnpm typecheck
 pnpm test:ci
-pnpm test:external
+```
+
+Focused test suites:
+
+```sh
+pnpm test:unit
+pnpm test:api
+pnpm test:sdk
 pnpm test:db
+pnpm test:worker
+```
+
+External service tests:
+
+```sh
 pnpm test:r2
 pnpm test:daytona
 pnpm test:providers:smoke
-pnpm test:claude
 pnpm test:e2e:codex
 pnpm test:e2e:claude
-pnpm typecheck
 ```
 
-## GitHub Actions Tests
+External tests require real credentials and may create cloud resources.
 
-`.github/workflows/test.yml` runs typecheck and local DB-backed tests on pull requests
-and pushes to `main`. Pushes to `main` and manual runs also run real R2, Daytona,
-Codex, and Claude Code E2E tests.
+## Deployment
 
-GitHub Actions E2E uses repository secrets:
+The open-source runtime can be self-hosted as two processes:
 
 ```sh
-DAYTONA_API_KEY
-OPENAI_API_KEY
-ANTHROPIC_API_KEY
-R2_ACCOUNT_ID
-R2_ACCESS_KEY_ID
-R2_SECRET_ACCESS_KEY
-R2_BUCKET
-R2_ENDPOINT
+pnpm api:start
+pnpm worker:start
 ```
 
-The CI jobs create their own Postgres service and use a per-job R2 artifact prefix.
-Claude Code E2E is wired but gated by the `RUN_CLAUDE_E2E=1` repository variable
-or the manual workflow checkbox because it requires a funded Anthropic account.
+The included `Dockerfile` builds the runtime image. This repo contains the
+self-hosted runtime; hosted AgentRouter Cloud is not required to use it.
 
-## Fly.io Deployment
+## Roadmap Before A Larger Launch
 
-The repo includes `fly.toml`, `Dockerfile`, and `.github/workflows/fly.yml`.
-The workflow deploys after the `Tests` workflow succeeds on `main` and can also be
-run manually from GitHub Actions.
+- Simplify the first local demo so a developer can see value with fewer services.
+- Publish the TypeScript SDK to npm.
+- Add a polished PR-review demo.
+- Add clearer docs for provider keys, Daytona, Postgres, and R2 setup.
+- Add approval-gate docs and examples.
 
-GitHub Actions uses:
+## Community
 
-```sh
-FLY_API_TOKEN # repository secret
-FLY_APP_NAME  # repository variable, defaults to agentrouter-dev
-```
+AgentRouter is early. Issues and PRs are welcome once the public repo is ready.
 
-Before the first deploy, set the runtime secrets on the Fly app:
+## License
 
-```sh
-flyctl secrets set \
-  AGENTROUTER_API_KEY=... \
-  DATABASE_URL=... \
-  DAYTONA_API_KEY=... \
-  OPENAI_API_KEY=... \
-  ANTHROPIC_API_KEY=... \
-  R2_ACCOUNT_ID=... \
-  R2_ACCESS_KEY_ID=... \
-  R2_SECRET_ACCESS_KEY=... \
-  R2_BUCKET=... \
-  R2_ENDPOINT=... \
-  --app agentrouter-dev
-```
+Add a license before the first public launch.

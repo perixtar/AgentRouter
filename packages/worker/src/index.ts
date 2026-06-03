@@ -19,7 +19,6 @@ import {
   type RunRecord,
   withSearchPath
 } from "@agentrouter/db";
-import { decrypt } from "@agentrouter/secret-box";
 import { buildClaudeCodeLaunchPlan } from "@agentrouter/runtime-claude-code";
 import {
   buildCodexLaunchPlan,
@@ -79,8 +78,6 @@ export interface RunOneWorkerIterationInput {
   testResourcePrefix: string;
   codexApiKey?: string;
   anthropicApiKey?: string;
-  /** Base64 master key for decrypting the org's BYOK provider key (Fly only). */
-  masterKey?: string;
   /** Idle minutes before a session's persistent sandbox auto-stops (default 15). */
   sessionAutoStopMinutes?: number;
   /** Daytona-side auto-delete backstop for persistent sandboxes (default 90). */
@@ -249,8 +246,7 @@ async function executeOneShotRun(
   let parkedAsSession = false;
 
   try {
-    const providerKeyOverride = await resolveOrgProviderKey(input, run);
-    const runtime = buildRuntimeLaunch(input, run, providerKeyOverride, {
+    const runtime = buildRuntimeLaunch(input, run, {
       // For grace-eligible runs, run Codex non-ephemeral so the thread persists.
       sessionMode: graceEligible
     });
@@ -423,13 +419,8 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * A "real" tenant org is a present, valid-UUID org id — i.e. a row that exists
- * in `orgs(id uuid)` and can be used to key the `provider_keys.org_id` (uuid)
- * lookup. The legacy/admin path authenticates with the raw AGENTROUTER_API_KEY
- * and gets the `"org_system"` sentinel (not a uuid); a missing/null org is the
- * other non-real case. Non-real orgs must NOT touch the uuid BYOK lookup and
- * must NOT enter the BYOK/grace lifecycle — they stay ephemeral on the global
- * key, exactly as pre-BYOK.
+ * Cloud-originated tenant ids are UUIDs. The self-hosted API key path uses the
+ * `"org_system"` sentinel, so those runs keep the simple ephemeral lifecycle.
  */
 function isRealOrg(orgId: string | null | undefined): orgId is string {
   return typeof orgId === "string" && UUID_RE.test(orgId);
@@ -437,10 +428,9 @@ function isRealOrg(orgId: string | null | undefined): orgId is string {
 
 /**
  * Grace applies only to runs that can actually be continued AND belong to a
- * real tenant: Codex in an exec-mode (default/read_only/full_access) with a
- * real (uuid) org. auto_review runs `codex review` (terminal) and claude_code
- * isn't session-capable; legacy/system global-key runs (no org or the
- * "org_system" sentinel) keep the ephemeral delete-on-finish lifecycle.
+ * UUID tenant: Codex in an exec-mode (default/read_only/full_access).
+ * auto_review runs `codex review` (terminal) and claude_code isn't
+ * session-capable; self-hosted system runs keep delete-on-finish behavior.
  */
 function isGraceEligibleRun(run: RunRecord): boolean {
   return (
@@ -482,8 +472,7 @@ async function executeSessionRun(
     if (!session) throw new RunFailure("session_not_found", "Session not found for run");
     hadExistingSandbox = Boolean(session.sandboxId) && session.sandboxState !== "none";
 
-    const providerKeyOverride = await resolveOrgProviderKey(input, run);
-    const codexKey = providerKeyOverride ?? input.codexApiKey;
+    const codexKey = input.codexApiKey;
     if (!codexKey) throw new Error("Missing Codex provider key for session run");
 
     const credentialBoundary = buildProviderProcessEnv({
@@ -648,7 +637,7 @@ async function executeSessionRun(
         // best-effort; auto-stop will suspend it anyway
       }
     } else if (!sandboxId && !hadExistingSandbox) {
-      // Pre-sandbox failure on a first turn (e.g. byok_missing): beginSessionTurn
+      // Pre-sandbox failure on a first turn: beginSessionTurn
       // flipped sandbox_state 'none'→'creating'. Reset to a clean retryable
       // state so the next message can start a fresh turn (OBS 3 + Bug 1c).
       await withClient(input, async (client) => {
@@ -801,12 +790,10 @@ function truncateFailureDetail(detail: string): string {
 function buildRuntimeLaunch(
   input: RunOneWorkerIterationInput,
   run: RunRecord,
-  providerKeyOverride?: string,
   options: { sessionMode?: boolean } = {}
 ): RuntimeLaunch {
   if (isCodexRunRecord(run)) {
-    // BYOK override (org run) takes precedence; global key is the legacy fallback.
-    const codexKey = providerKeyOverride ?? input.codexApiKey;
+    const codexKey = input.codexApiKey;
     if (!codexKey) {
       throw new Error("Missing CODEX_API_KEY or OPENAI_API_KEY for Codex runtime");
     }
@@ -847,7 +834,7 @@ function buildRuntimeLaunch(
   }
 
   if (isClaudeCodeRunRecord(run)) {
-    const anthropicKey = providerKeyOverride ?? input.anthropicApiKey;
+    const anthropicKey = input.anthropicApiKey;
     if (!anthropicKey) {
       throw new Error("Missing ANTHROPIC_API_KEY for Claude Code runtime");
     }
@@ -1421,53 +1408,6 @@ async function markRunFailed(
       await repo.updateRunStatus(runId, "failed", { code, reason });
     }
   });
-}
-
-/**
- * Resolves the raw provider key for a run.
- * - real org run (org_id is a uuid): decrypt the org's provider_keys row → that
- *   key only. No key → RunFailure("byok_missing").
- * - legacy/system run (org_id null or the "org_system" sentinel, i.e. not a
- *   uuid): undefined → buildRuntimeLaunch uses the global key. Crucially we must
- *   NOT query provider_keys (org_id is a uuid column) with a non-uuid principal,
- *   or Postgres raises `invalid input syntax for type uuid` and the run fails.
- */
-async function resolveOrgProviderKey(
-  input: RunOneWorkerIterationInput,
-  run: RunRecord
-): Promise<string | undefined> {
-  if (!isRealOrg(run.orgId)) return undefined;
-
-  // BYOK currently covers OpenAI/Codex. Claude Code BYOK is a later phase; for
-  // now only resolve for codex runs (claude_code org runs fall through to the
-  // global key path in buildRuntimeLaunch).
-  if (!isCodexRunRecord(run)) return undefined;
-
-  const provider = "openai";
-  const encrypted = await withClient(input, async (client) => {
-    const repo = new RunRepository(client);
-    return repo.getProviderKey(run.orgId!, provider);
-  });
-
-  if (!encrypted) {
-    throw new RunFailure(
-      "byok_missing",
-      "No provider key connected for this org. Connect your OpenAI key."
-    );
-  }
-
-  const masterKey = input.masterKey ?? process.env.AGENTROUTER_MASTER_KEY;
-  if (!masterKey) {
-    throw new RunFailure(
-      "byok_unconfigured",
-      "Provider key decryption is not configured (missing master key)"
-    );
-  }
-
-  return decrypt(
-    { ciphertext: encrypted.ciphertext, iv: encrypted.iv, tag: encrypted.tag, keyVersion: encrypted.keyVersion },
-    masterKey
-  );
 }
 
 async function withClient<T>(

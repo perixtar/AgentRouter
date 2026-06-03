@@ -1,13 +1,6 @@
 export interface AgentRouterOptions {
   baseUrl?: string;
   apiKey: string;
-  /**
-   * Org to act as. When set, every request sends `X-AR-Org-Id: <orgId>`. This is
-   * the web/server path: pair it with the shared `AGENTROUTER_WEB_SERVICE_TOKEN`
-   * as `apiKey` so the API trusts the asserted org. External SDK customers using
-   * an `ar_live_…` key leave this unset (the key already resolves their org).
-   */
-  orgId?: string;
   /** Extra headers sent on every request (merged before per-call headers). */
   defaultHeaders?: Record<string, string>;
   fetchImpl?: typeof fetch;
@@ -503,10 +496,7 @@ class AgentRouterHttpClient {
     this.baseUrl = (options.baseUrl ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.baseHeaders = {
-      ...(options.defaultHeaders ?? {}),
-      ...(options.orgId ? { "x-ar-org-id": options.orgId } : {})
-    };
+    this.baseHeaders = { ...(options.defaultHeaders ?? {}) };
   }
 
   async create(input: CreateRunRequest): Promise<Run> {

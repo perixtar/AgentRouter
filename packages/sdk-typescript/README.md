@@ -6,7 +6,7 @@ Run, **continue**, and stream AgentRouter coding-agent runs from TypeScript. A r
 import { agentrouter, codex, runAgent, streamAgent } from "@agentrouter/sdk";
 
 const ar = agentrouter({
-  baseUrl: "https://agentrouter-dev.fly.dev",
+  baseUrl: "http://127.0.0.1:8787",
   apiKey: process.env.AGENTROUTER_API_KEY!
 });
 
@@ -80,16 +80,5 @@ for await (const part of stream.fullStream) {
 
 `fullStream` exposes safe progress summaries and observable activity. It does not expose raw hidden model chain-of-thought.
 
-## Acting on behalf of an org (server / web)
-
-External customers authenticate with their own `ar_live_…` key (it already resolves their org). A trusted server (e.g. the web backend) can instead present the shared web service token and assert the org via the `X-AR-Org-Id` header by passing `orgId`:
-
-```ts
-const ar = agentrouter({
-  baseUrl: process.env.AGENTROUTER_API_URL,
-  apiKey: process.env.AGENTROUTER_WEB_SERVICE_TOKEN!,
-  orgId: resolvedOrgId           // → sends `X-AR-Org-Id: <orgId>` on every request
-});
-```
-
-Use `defaultHeaders` for any other per-client headers.
+Use `defaultHeaders` when your self-hosted deployment needs additional
+per-client headers.
