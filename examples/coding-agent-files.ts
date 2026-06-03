@@ -1,6 +1,6 @@
 import { gunzipSync } from "node:zlib";
-import type { Artifact, RunSession } from "agentrouter";
-import { streamAgent } from "agentrouter";
+import type { Artifact, RunSession } from "@agentrouterhq/sdk";
+import { streamAgent } from "@agentrouterhq/sdk";
 import {
   codexRuntime,
   handleExampleError,

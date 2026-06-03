@@ -154,11 +154,11 @@ pnpm worker:run-once
 Install the SDK from npm:
 
 ```sh
-npm install agentrouter
+npm install @agentrouterhq/sdk
 ```
 
 ```ts
-import { agentrouter, codex, runAgent } from "agentrouter";
+import { agentrouter, codex, runAgent } from "@agentrouterhq/sdk";
 
 const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
@@ -186,7 +186,7 @@ A run id can become the conversation handle. Start a run, then continue it by
 posting a follow-up message to the same run id.
 
 ```ts
-import { agentrouter, codex, continueAgent } from "agentrouter";
+import { agentrouter, codex, continueAgent } from "@agentrouterhq/sdk";
 
 const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
@@ -262,7 +262,7 @@ keep provider credentials in their own environment.
 
 | Package | Purpose |
 | --- | --- |
-| `agentrouter` | TypeScript client and helpers for creating, streaming, and continuing runs |
+| `@agentrouterhq/sdk` | TypeScript client and helpers for creating, streaming, and continuing runs |
 | `@agentrouter/api` | Fastify API server for runs, events, artifacts, and sessions |
 | `@agentrouter/worker` | Worker loop that claims runs and executes them in sandboxes |
 | `@agentrouter/core` | Shared run state, event normalization, and provider output parsing |

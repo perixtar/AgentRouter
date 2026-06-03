@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { expect } from "vitest";
-import type { AgentRouterClient, Artifact, RunEvent, RunSession } from "agentrouter";
+import type { AgentRouterClient, Artifact, RunEvent, RunSession } from "@agentrouterhq/sdk";
 
 const requiredEventTypes = [
   "run.claimed",

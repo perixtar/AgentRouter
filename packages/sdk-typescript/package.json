@@ -1,5 +1,5 @@
 {
-  "name": "agentrouter",
+  "name": "@agentrouterhq/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for AgentRouter",
   "license": "MIT",

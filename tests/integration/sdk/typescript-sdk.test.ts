@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
-import { agentrouter, claudeCode, codex, runAgent, streamAgent } from "agentrouter";
+import { agentrouter, claudeCode, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
 import {
@@ -406,13 +406,13 @@ describe("AgentRouter TypeScript SDK", () => {
   });
 
   it("does not export a separate resumeRun helper", async () => {
-    const sdkModule = await import("agentrouter");
+    const sdkModule = await import("@agentrouterhq/sdk");
 
     expect(sdkModule).not.toHaveProperty("resumeRun");
   });
 
   it("exposes run-id multi-turn helpers (continueRun/getRunTurns/closeRun/continueAgent)", async () => {
-    const sdkModule = await import("agentrouter");
+    const sdkModule = await import("@agentrouterhq/sdk");
     const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
 
     // Client methods exist.

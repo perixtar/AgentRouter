@@ -18,7 +18,7 @@ export default defineConfig({
       "@agentrouter/runtime-claude-code": new URL("./packages/runtime/claude-code/src/index.ts", import.meta.url).pathname,
       "@agentrouter/worker": new URL("./packages/worker/src/index.ts", import.meta.url).pathname,
       "@agentrouter/api": new URL("./apps/api/src/server.ts", import.meta.url).pathname,
-      "agentrouter": new URL("./packages/sdk-typescript/src/index.ts", import.meta.url).pathname
+      "@agentrouterhq/sdk": new URL("./packages/sdk-typescript/src/index.ts", import.meta.url).pathname
     }
   }
 });

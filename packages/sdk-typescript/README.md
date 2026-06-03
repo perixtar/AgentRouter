@@ -3,7 +3,7 @@
 Run, **continue**, and stream AgentRouter coding-agent runs from TypeScript. A run id is the conversation handle — start with `createRun`, then continue the same conversation by that id.
 
 ```ts
-import { agentrouter, codex, runAgent, streamAgent } from "agentrouter";
+import { agentrouter, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
 
 const ar = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
@@ -53,7 +53,7 @@ const result = await runAgent({
 });
 
 // or stream the new turn's events/text
-import { continueAgent } from "agentrouter";
+import { continueAgent } from "@agentrouterhq/sdk";
 const stream = await continueAgent({ client: ar, runId: run.id, message: "Refactor it" });
 for await (const part of stream.fullStream) {
   if (part.type === "progress") console.log(part.text);

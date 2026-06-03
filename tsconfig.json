@@ -21,7 +21,7 @@
       "@agentrouter/runtime-claude-code": ["packages/runtime/claude-code/src/index.ts"],
       "@agentrouter/worker": ["packages/worker/src/index.ts"],
       "@agentrouter/api": ["apps/api/src/server.ts"],
-      "agentrouter": ["packages/sdk-typescript/src/index.ts"]
+      "@agentrouterhq/sdk": ["packages/sdk-typescript/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"]

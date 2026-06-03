@@ -5,7 +5,7 @@ import {
   codex,
   runAgent,
   type RunEvent
-} from "agentrouter";
+} from "@agentrouterhq/sdk";
 
 loadDotEnv();
 

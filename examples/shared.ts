@@ -5,7 +5,7 @@ import {
   claudeCode,
   codex,
   type RunEvent
-} from "agentrouter";
+} from "@agentrouterhq/sdk";
 
 loadDotEnv();
 

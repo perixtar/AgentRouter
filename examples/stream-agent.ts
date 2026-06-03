@@ -1,4 +1,4 @@
-import { streamAgent } from "agentrouter";
+import { streamAgent } from "@agentrouterhq/sdk";
 import {
   codexRuntime,
   handleExampleError,
