@@ -260,7 +260,7 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
     await client.query("alter table runs add column if not exists org_id text");
     await client.query("alter table run_attempts add column if not exists org_id text");
     await client.query("create index if not exists runs_org_id_idx on runs(org_id)");
-    // ── M4: a run may belong to a multi-turn session (null = one-shot). ──
+    // A run may belong to a conversation's internal session (null = one-shot).
     await client.query("alter table runs add column if not exists session_id text");
     // ── Run-id multi-turn (M1): the run that seeded a conversation (the public
     //    conversation handle) + an idle deadline the reaper enforces so a
