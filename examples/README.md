@@ -56,7 +56,7 @@ pnpm example:quickstart:run
 
 | Command | Requires Worker | What It Covers |
 | --- | --- | --- |
-| `pnpm example:recipe:continue` | Yes | Run-id continuation, sandbox/session reuse, `getRunTurns`, `closeRun` |
+| `pnpm example:recipe:continue` | Yes | Run-id continuation, sandbox/thread reuse, `getRunTurns`, `closeRun` |
 | `pnpm example:recipe:artifacts` | Yes | R2 artifacts, workspace file index, workspace patch, stdout download |
 | `pnpm example:recipe:runtime-modes` | Yes | Codex and Claude Code runtime mode selection |
 | `pnpm example:recipe:low-level` | No | Direct client methods: create, list, events, cancel, get |
