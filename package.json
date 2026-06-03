@@ -2,7 +2,16 @@
   "name": "agentrouter",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/perixtar/AgentRouter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/perixtar/AgentRouter/issues"
+  },
+  "homepage": "https://github.com/perixtar/AgentRouter#readme",
   "packageManager": "pnpm@10.18.2",
   "scripts": {
     "test": "vitest run",

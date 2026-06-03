@@ -2,8 +2,26 @@
   "name": "@agentrouter/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for AgentRouter",
+  "license": "MIT",
   "type": "module",
   "sideEffects": false,
+  "keywords": [
+    "agentrouter",
+    "agents",
+    "codex",
+    "claude-code",
+    "sandbox",
+    "coding-agents"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/perixtar/AgentRouter.git",
+    "directory": "packages/sdk-typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/perixtar/AgentRouter/issues"
+  },
+  "homepage": "https://github.com/perixtar/AgentRouter#readme",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
