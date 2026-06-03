@@ -238,6 +238,13 @@ The public SDK uses run ids as the only conversation handle. Use
 `runAgent({ continueRun, message })` when you only need the final result.
 There is no separate public session API.
 
+Mental model:
+
+```txt
+conversationId  stable id for the whole conversation; this is the first run id
+runId           id for one specific turn; each follow-up turn gets a new run id
+```
+
 ```ts
 import { agentrouter, codex, streamAgent } from "@agentrouterhq/sdk";
 

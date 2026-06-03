@@ -120,6 +120,16 @@ Run ids are the SDK's public conversation handle. Use `streamAgent` with
 `continueRun` for streamed follow-up turns, or `runAgent` with `continueRun`
 when you only need the final result. There is no separate public session API.
 
+`conversationId` and `runId` are different on follow-up turns:
+
+```txt
+conversationId  stable id for the whole conversation; pass this as continueRun
+runId           id for one specific turn; stream/fetch this turn's events
+```
+
+For turn 1 they are the same id. For turn 2+, `conversationId` stays fixed as
+the first run id, while `runId` is the newly-created run for that turn.
+
 ```ts
 import { agentrouter, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
 

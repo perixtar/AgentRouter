@@ -155,6 +155,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Run"
+  /v1/runs/{runId}/messages:
+    post:
+      operationId: continueRun
+      description: >
+        Continue a run-id conversation. The path runId is the stable
+        conversation id, which is the first run id. The response runId is the
+        newly-created run for this follow-up turn.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationMessageRequest"
+      responses:
+        "202":
+          description: Follow-up turn enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContinueRunResult"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/turns:
+    get:
+      operationId: getRunTurns
+      description: List turns for a run-id conversation.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Conversation turns
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunTurnsResult"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/close:
+    post:
+      operationId: closeRun
+      description: Close a run-id conversation and arm sandbox reclaim.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Conversation closed or already not reclaimable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloseRunResult"
+        "404":
+          $ref: "#/components/responses/Error"
   /v1/runs/{runId}/artifacts:
     get:
       operationId: listRunArtifacts
@@ -294,6 +350,15 @@ components:
       properties:
         id:
           type: string
+          description: Run id for this specific run or turn.
+        conversationId:
+          type: string
+          description: Stable conversation id. For multi-turn conversations this is the first run id.
+        sessionId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Internal session id when a run has been promoted for continuation.
         status:
           $ref: "#/components/schemas/RunStatus"
         runtime:
@@ -380,6 +445,67 @@ components:
         createdAt:
           type: string
           format: date-time
+    ConversationMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 120000
+    ContinueRunResult:
+      type: object
+      required: [runId, turnNumber, conversationId]
+      properties:
+        runId:
+          type: string
+          description: New run id for the follow-up turn.
+        turnNumber:
+          type: integer
+          minimum: 1
+        conversationId:
+          type: string
+          description: Stable conversation id, equal to the first run id.
+    RunTurn:
+      type: object
+      required: [id, runId, turnNumber, prompt, createdAt]
+      properties:
+        id:
+          type: string
+        runId:
+          type: string
+          description: Run id for this specific turn.
+        turnNumber:
+          type: integer
+          minimum: 1
+        prompt:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    RunTurnsResult:
+      type: object
+      required: [conversationId, items]
+      properties:
+        conversationId:
+          type: string
+          description: Stable conversation id, equal to the first run id.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunTurn"
+    CloseRunResult:
+      type: object
+      required: [closed, conversationId, reclaimed]
+      properties:
+        closed:
+          type: boolean
+        conversationId:
+          type: string
+          description: Stable conversation id, equal to the first run id.
+        reclaimed:
+          type: boolean
     AgentResponse:
       type: object
       required: [text, parts]
