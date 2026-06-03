@@ -386,6 +386,105 @@ describe("AgentRouter TypeScript SDK", () => {
     });
   });
 
+  it("drains events up to terminal lastEventSeq before ending a stream", async () => {
+    const runId = "run_stream_terminal_race";
+    const eventPageRequests: number[] = [];
+    const sdk = agentrouter({
+      baseUrl: "https://agentrouter.test",
+      apiKey: "ar_test",
+      fetchImpl: async (input, init) => {
+        const url = new URL(String(input));
+
+        if (url.pathname === "/v1/runs" && init?.method === "POST") {
+          return jsonResponse({
+            id: runId,
+            status: "queued",
+            runtime: { kind: "codex", mode: "default" },
+            task: "race",
+            input: {},
+            lastEventSeq: 0,
+            queuedAt: new Date(0).toISOString()
+          });
+        }
+
+        if (url.pathname === `/v1/runs/${runId}/events`) {
+          const afterSeq = Number(url.searchParams.get("afterSeq") ?? "0");
+          eventPageRequests.push(afterSeq);
+          return jsonResponse({
+            items:
+              afterSeq === 0
+                ? [
+                    runEvent(runId, 1, "agent.progress", { summary: "started" }),
+                    runEvent(runId, 2, "agent.response", {
+                      text: "answer",
+                      parts: [{ type: "text", text: "answer" }],
+                      provider: "codex"
+                    })
+                  ]
+                : [runEvent(runId, 3, "run.completed", { message: "completed" })],
+            nextAfterSeq: afterSeq === 0 ? 2 : 3
+          });
+        }
+
+        if (url.pathname === `/v1/runs/${runId}/session`) {
+          return jsonResponse({
+            run: {
+              id: runId,
+              status: "completed",
+              runtime: { kind: "codex", mode: "default" },
+              task: "race",
+              input: {},
+              lastEventSeq: 3,
+              queuedAt: new Date(0).toISOString(),
+              completedAt: new Date(1).toISOString()
+            },
+            eventCursor: { lastEventSeq: 3 },
+            response: {
+              text: "answer",
+              parts: [{ type: "text", text: "answer" }],
+              provider: "codex"
+            },
+            artifactManifest: { status: "missing" },
+            artifacts: { items: [] }
+          });
+        }
+
+        if (url.pathname === `/v1/runs/${runId}`) {
+          return jsonResponse({
+            id: runId,
+            status: "completed",
+            runtime: { kind: "codex", mode: "default" },
+            task: "race",
+            input: {},
+            lastEventSeq: 3,
+            queuedAt: new Date(0).toISOString(),
+            completedAt: new Date(1).toISOString()
+          });
+        }
+
+        throw new Error(`Unexpected SDK request: ${init?.method ?? "GET"} ${url.pathname}`);
+      }
+    });
+
+    const stream = await streamAgent({
+      client: sdk,
+      task: "race",
+      runtime: codex(),
+      pollIntervalMs: 1,
+      maxWaitMs: 1000
+    });
+
+    const events = [];
+    for await (const event of stream.events) {
+      events.push(event);
+    }
+    await expect(stream.finalResult).resolves.toMatchObject({ id: runId, status: "completed" });
+
+    expect(eventPageRequests).toContain(2);
+    expect(events.map((event) => event.sequence)).toEqual([1, 2, 3]);
+    expect(events.at(-1)).toMatchObject({ type: "run.completed" });
+  });
+
   it("creates Claude Code runs through the same SDK client", async () => {
     const sdk = agentrouter({
       baseUrl,
@@ -423,3 +522,28 @@ describe("AgentRouter TypeScript SDK", () => {
     expect(typeof sdkModule.continueAgent).toBe("function");
   });
 });
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
+
+function runEvent(
+  runId: string,
+  sequence: number,
+  type: string,
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    runId,
+    sequence,
+    type,
+    source: "worker",
+    visibility: "public",
+    payload,
+    isTruncated: false,
+    createdAt: new Date(sequence).toISOString()
+  };
+}

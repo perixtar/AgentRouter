@@ -657,6 +657,10 @@ class AgentRouterHttpClient {
 
       const current = await this.get(run.id);
       if (["completed", "failed", "cancelled"].includes(current.status)) {
+        if (afterSeq < current.lastEventSeq) {
+          if (eventPage.items.length === 0) await sleep(pollIntervalMs);
+          continue;
+        }
         return this.session(run.id);
       }
 
@@ -749,6 +753,10 @@ async function waitForRun(
 
     const current = await client.getRun(runId);
     if (["completed", "failed", "cancelled"].includes(current.status)) {
+      if (afterSeq < current.lastEventSeq) {
+        if (eventPage.items.length === 0) await sleep(pollIntervalMs);
+        continue;
+      }
       return client.getRunSession(runId);
     }
 
@@ -871,6 +879,10 @@ async function* streamRunEventsUntilTerminal(
 
     const current = await client.getRun(runId);
     if (["completed", "failed", "cancelled"].includes(current.status)) {
+      if (afterSeq < current.lastEventSeq) {
+        if (eventPage.items.length === 0) await sleep(pollIntervalMs);
+        continue;
+      }
       return;
     }
 
