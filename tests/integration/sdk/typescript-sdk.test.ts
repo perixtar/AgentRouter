@@ -279,6 +279,49 @@ describe("AgentRouter TypeScript SDK", () => {
     expect(closed).toMatchObject({ closed: true, conversationId: run.id, reclaimed: true });
   });
 
+  it("retries closeRun while a completed continuable Codex run is still being promoted", async () => {
+    const runId = "run_close_promote_race";
+    let closeAttempts = 0;
+    const sdk = agentrouter({
+      baseUrl: "https://agentrouter.test",
+      apiKey: "ar_test",
+      fetchImpl: async (input) => {
+        const url = new URL(String(input));
+
+        if (url.pathname === `/v1/runs/${runId}/close`) {
+          closeAttempts += 1;
+          return jsonResponse({
+            closed: true,
+            conversationId: runId,
+            reclaimed: closeAttempts > 1
+          });
+        }
+
+        if (url.pathname === `/v1/runs/${runId}`) {
+          return jsonResponse({
+            id: runId,
+            status: "completed",
+            runtime: { kind: "codex", mode: "full_access" },
+            task: "race",
+            input: {},
+            lastEventSeq: 10,
+            queuedAt: new Date(0).toISOString(),
+            completedAt: new Date(1).toISOString()
+          });
+        }
+
+        throw new Error(`Unexpected SDK request: GET ${url.pathname}`);
+      }
+    });
+
+    await expect(sdk.closeRun(runId)).resolves.toMatchObject({
+      closed: true,
+      conversationId: runId,
+      reclaimed: true
+    });
+    expect(closeAttempts).toBe(2);
+  });
+
   it("rejects continuing a non-promoted run with run_not_continuable", async () => {
     const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
     const run = await sdk.createRun({

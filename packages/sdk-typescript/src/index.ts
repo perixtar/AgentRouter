@@ -341,6 +341,14 @@ function isRunAgentCreateRequest(input: RunAgentRequest): input is RunAgentCreat
   return "task" in input && typeof input.task === "string";
 }
 
+function isCompletedContinuableCodexRun(run: Run): boolean {
+  return (
+    run.status === "completed" &&
+    run.runtime.kind === "codex" &&
+    ["default", "read_only", "full_access"].includes(run.runtime.mode)
+  );
+}
+
 export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunStream> {
   const { client, pollIntervalMs, maxWaitMs, ...request } = input;
   const run = await client.createRun(request);
@@ -454,7 +462,26 @@ class AgentRouterClientImpl implements AgentRouterClient {
   }
 
   async closeRun(runId: string): Promise<CloseRunResult> {
-    return this.http.closeRun(runId);
+    // Closing immediately after a successful one-shot Codex run can race the
+    // worker's grace-park promotion. In that narrow window the API has the run
+    // but not yet the session, so it returns reclaimed:false. Retry briefly for
+    // completed continuable Codex runs; return immediately for truly
+    // non-continuable runtimes or once the deadline is exhausted.
+    const deadline = Date.now() + 8000;
+    for (let attempt = 0; ; attempt++) {
+      const result = await this.http.closeRun(runId);
+      if (result.reclaimed || Date.now() >= deadline) return result;
+
+      let run: Run;
+      try {
+        run = await this.http.get(runId);
+      } catch {
+        return result;
+      }
+      if (!isCompletedContinuableCodexRun(run)) return result;
+
+      await sleep(Math.min(250 * (attempt + 1), 1000));
+    }
   }
 
   // ── sessions (M4) ──
