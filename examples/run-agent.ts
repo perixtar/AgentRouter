@@ -1,4 +1,4 @@
-import { runAgent } from "@agentrouter/sdk";
+import { runAgent } from "agentrouter";
 import {
   codexRuntime,
   handleExampleError,

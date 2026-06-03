@@ -151,11 +151,14 @@ pnpm worker:run-once
 
 ## TypeScript SDK
 
-The SDK lives in this workspace and is imported by the examples as
-`@agentrouter/sdk`. Publishing it to npm is on the roadmap.
+Install the SDK from npm:
+
+```sh
+npm install agentrouter
+```
 
 ```ts
-import { agentrouter, codex, runAgent } from "@agentrouter/sdk";
+import { agentrouter, codex, runAgent } from "agentrouter";
 
 const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
@@ -183,7 +186,7 @@ A run id can become the conversation handle. Start a run, then continue it by
 posting a follow-up message to the same run id.
 
 ```ts
-import { agentrouter, codex, continueAgent } from "@agentrouter/sdk";
+import { agentrouter, codex, continueAgent } from "agentrouter";
 
 const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
@@ -259,7 +262,7 @@ keep provider credentials in their own environment.
 
 | Package | Purpose |
 | --- | --- |
-| `@agentrouter/sdk` | TypeScript client and helpers for creating, streaming, and continuing runs |
+| `agentrouter` | TypeScript client and helpers for creating, streaming, and continuing runs |
 | `@agentrouter/api` | Fastify API server for runs, events, artifacts, and sessions |
 | `@agentrouter/worker` | Worker loop that claims runs and executes them in sandboxes |
 | `@agentrouter/core` | Shared run state, event normalization, and provider output parsing |
@@ -318,7 +321,7 @@ API process by default; run a separate worker process for queued runs.
 Current focus:
 
 - Reduce first-run setup friction.
-- Publish the TypeScript SDK package.
+- Add stronger SDK examples for installed-package usage.
 - Add a polished PR-review demo.
 - Add approval-gate docs and examples.
 
