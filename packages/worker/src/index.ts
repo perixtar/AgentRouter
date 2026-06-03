@@ -415,26 +415,16 @@ async function executeOneShotRun(
   }
 }
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * Cloud-originated tenant ids are UUIDs. The self-hosted API key path uses the
- * `"org_system"` sentinel, so those runs keep the simple ephemeral lifecycle.
- */
-function isRealOrg(orgId: string | null | undefined): orgId is string {
-  return typeof orgId === "string" && UUID_RE.test(orgId);
-}
-
 /**
  * Grace applies only to runs that can actually be continued AND belong to a
- * UUID tenant: Codex in an exec-mode (default/read_only/full_access).
+ * scoped tenant: Codex in an exec-mode (default/read_only/full_access).
  * auto_review runs `codex review` (terminal) and claude_code isn't
- * session-capable; self-hosted system runs keep delete-on-finish behavior.
+ * session-capable.
  */
 function isGraceEligibleRun(run: RunRecord): boolean {
   return (
-    isRealOrg(run.orgId) &&
+    typeof run.orgId === "string" &&
+    run.orgId.length > 0 &&
     isCodexRunRecord(run) &&
     ["default", "read_only", "full_access"].includes(run.runtimeMode)
   );

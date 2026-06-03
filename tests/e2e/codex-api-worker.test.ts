@@ -2,13 +2,19 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
-import { agentrouter, codex, streamAgent, type RunEvent } from "@agentrouterhq/sdk";
+import {
+  agentrouter,
+  codex,
+  continueAgent,
+  streamAgent,
+  type RunEvent
+} from "@agentrouterhq/sdk";
 import { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
 import { applyPhase1Migrations, dropSchema } from "@agentrouter/db";
 import { DaytonaSandboxDriver } from "@agentrouter/sandbox-daytona";
-import { runOneWorkerIteration, runWorkerLoop } from "@agentrouter/worker";
+import { reapExpiredSandboxes, runOneWorkerIteration, runWorkerLoop } from "@agentrouter/worker";
 import { assertSuccessfulE2ERun } from "./assertions.js";
 
 loadDotEnv();
@@ -110,6 +116,28 @@ describeRealE2E("real Codex API + worker E2E", () => {
           config.r2.accessKeyId
         ]
       });
+
+      const closeResult = await sdk.closeRun(stream.run.id);
+      expect(closeResult).toMatchObject({
+        closed: true,
+        conversationId: stream.run.id,
+        reclaimed: true
+      });
+      await expect(
+        reapExpiredSandboxes({
+          pool,
+          schema,
+          workerId: `worker_${randomUUID()}`,
+          sandbox: new DaytonaSandboxDriver({
+            apiKey: config.daytonaApiKey,
+            testResourcePrefix: config.testResourcePrefix
+          }),
+          artifactStore,
+          testResourcePrefix: config.testResourcePrefix,
+          codexApiKey: config.codexApiKey,
+          baseEnv: process.env
+        })
+      ).resolves.toBeGreaterThanOrEqual(1);
     } finally {
       controller.abort();
       await worker;
@@ -131,4 +159,159 @@ describeRealE2E("real Codex API + worker E2E", () => {
       })
     ).resolves.toEqual({ processed: false });
   }, 600_000);
+
+  it("continues a real Codex conversation in the same sandbox and reclaims it", async () => {
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+    const runtimeModel = process.env.AGENTROUTER_MODEL;
+    const controller = new AbortController();
+    const worker = runWorkerLoop({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: new DaytonaSandboxDriver({
+        apiKey: config.daytonaApiKey,
+        testResourcePrefix: config.testResourcePrefix
+      }),
+      artifactStore,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env,
+      signal: controller.signal,
+      pollIntervalMs: 250
+    });
+
+    try {
+      const first = await streamAgent({
+        client: sdk,
+        pollIntervalMs: 500,
+        maxWaitMs: 10 * 60 * 1000,
+        task:
+          "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CODEX_TURN1_OK\\n' > reports/agent-smoke.txt. Then summarize the change in one sentence.",
+        runtime: codex({ mode: "full_access", ...(runtimeModel ? { model: runtimeModel } : {}) })
+      });
+      runIds.push(first.run.id);
+
+      const firstEvents: RunEvent[] = [];
+      for await (const event of first.events) {
+        firstEvents.push(event);
+      }
+      const firstResult = await first.finalResult;
+
+      await assertSuccessfulE2ERun({
+        client: sdk,
+        session: firstResult.session,
+        events: firstEvents,
+        providerSource: "codex",
+        runtimeKind: "codex",
+        marker: "AR_CODEX_TURN1_OK",
+        createdPath: "reports/agent-smoke.txt",
+        secretCanaries: [
+          config.codexApiKey,
+          config.daytonaApiKey,
+          config.r2.secretAccessKey,
+          config.r2.accessKeyId
+        ]
+      });
+
+      const second = await continueAgent({
+        client: sdk,
+        runId: firstResult.id,
+        message:
+          "Use the shell tool to run exactly: grep -qx 'AR_CODEX_TURN1_OK' reports/agent-smoke.txt && printf 'AR_CODEX_TURN2_OK\\n' > reports/turn2.txt. Then summarize the result in one sentence.",
+        pollIntervalMs: 500,
+        maxWaitMs: 10 * 60 * 1000
+      });
+      runIds.push(second.run.id);
+      expect(second.conversationId).toBe(firstResult.id);
+      expect(second.turnNumber).toBe(2);
+
+      const secondEvents: RunEvent[] = [];
+      for await (const event of second.events) {
+        secondEvents.push(event);
+      }
+      const secondResult = await second.finalResult;
+
+      await assertSuccessfulE2ERun({
+        client: sdk,
+        session: secondResult.session,
+        events: secondEvents,
+        providerSource: "codex",
+        runtimeKind: "codex",
+        marker: "AR_CODEX_TURN2_OK",
+        createdPath: "reports/turn2.txt",
+        sandboxLifecycleEventType: "sandbox.resumed",
+        requiredEventTypes: [
+          "run.claimed",
+          "sandbox.resumed",
+          "provider.stdout",
+          "provider.stderr",
+          "agent.response",
+          "workspace.file_index_collected",
+          "workspace.patch_collected",
+          "run.completed"
+        ],
+        secretCanaries: [
+          config.codexApiKey,
+          config.daytonaApiKey,
+          config.r2.secretAccessKey,
+          config.r2.accessKeyId
+        ]
+      });
+
+      const turns = await sdk.getRunTurns(firstResult.id);
+      expect(turns.conversationId).toBe(firstResult.id);
+      expect(turns.items).toEqual([
+        expect.objectContaining({
+          runId: firstResult.id,
+          turnNumber: 1
+        }),
+        expect.objectContaining({
+          runId: second.run.id,
+          turnNumber: 2,
+          prompt: expect.stringContaining("AR_CODEX_TURN2_OK")
+        })
+      ]);
+
+      const closeResult = await sdk.closeRun(firstResult.id);
+      expect(closeResult).toMatchObject({
+        closed: true,
+        conversationId: firstResult.id,
+        reclaimed: true
+      });
+      await expect(
+        reapExpiredSandboxes({
+          pool,
+          schema,
+          workerId: `worker_${randomUUID()}`,
+          sandbox: new DaytonaSandboxDriver({
+            apiKey: config.daytonaApiKey,
+            testResourcePrefix: config.testResourcePrefix
+          }),
+          artifactStore,
+          testResourcePrefix: config.testResourcePrefix,
+          codexApiKey: config.codexApiKey,
+          baseEnv: process.env
+        })
+      ).resolves.toBeGreaterThanOrEqual(1);
+    } finally {
+      controller.abort();
+      await worker;
+    }
+
+    await expect(
+      runOneWorkerIteration({
+        pool,
+        schema,
+        workerId: `worker_${randomUUID()}`,
+        sandbox: new DaytonaSandboxDriver({
+          apiKey: config.daytonaApiKey,
+          testResourcePrefix: config.testResourcePrefix
+        }),
+        artifactStore,
+        testResourcePrefix: config.testResourcePrefix,
+        codexApiKey: config.codexApiKey,
+        baseEnv: process.env
+      })
+    ).resolves.toEqual({ processed: false });
+  }, 900_000);
 });

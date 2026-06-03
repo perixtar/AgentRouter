@@ -3,7 +3,7 @@ import { gunzipSync } from "node:zlib";
 import { expect } from "vitest";
 import type { AgentRouterClient, Artifact, RunEvent, RunSession } from "@agentrouterhq/sdk";
 
-const requiredEventTypes = [
+const defaultRequiredEventTypes = [
   "run.claimed",
   "sandbox.created",
   "credential_boundary.verified",
@@ -33,12 +33,16 @@ export interface SuccessfulE2ERunExpectation {
   marker: string;
   createdPath: string;
   secretCanaries?: Array<string | undefined>;
+  requiredEventTypes?: string[];
+  sandboxLifecycleEventType?: "sandbox.created" | "sandbox.resumed";
 }
 
 export async function assertSuccessfulE2ERun(
   expectation: SuccessfulE2ERunExpectation
 ): Promise<void> {
   const { client, session, events, providerSource, runtimeKind, marker, createdPath } = expectation;
+  const requiredEventTypes = expectation.requiredEventTypes ?? defaultRequiredEventTypes;
+  const sandboxLifecycleEventType = expectation.sandboxLifecycleEventType ?? "sandbox.created";
   const runId = session.run.id;
 
   if (session.run.status !== "completed") {
@@ -61,7 +65,10 @@ export async function assertSuccessfulE2ERun(
   );
 
   expect(eventByType(events, "run.claimed").source).toBe("worker");
-  expect(eventByType(events, "sandbox.created").source).toBe("worker");
+  expect(eventByType(events, sandboxLifecycleEventType).source).toBe("worker");
+  if (requiredEventTypes.includes("credential_boundary.verified")) {
+    expect(eventByType(events, "credential_boundary.verified").source).toBe("worker");
+  }
   expect(eventByType(events, "provider.stdout").source).toBe(providerSource);
   expect(eventByType(events, "provider.stderr").source).toBe(providerSource);
   expect(eventByType(events, "agent.response").source).toBe(providerSource);

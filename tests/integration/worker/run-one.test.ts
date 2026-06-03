@@ -148,10 +148,10 @@ describe("worker run-one orchestration", () => {
     }
   }, 60_000);
 
-  it("completes a self-hosted system org Codex run on the configured provider key", async () => {
+  it("parks a self-hosted system org Codex run so it can be continued by run id", async () => {
     // The self-hosted API key path resolves to the "org_system" sentinel. It
-    // keeps the simple delete-on-finish lifecycle and uses the configured
-    // provider key from the worker environment.
+    // should still support the public run-id continuation surface, using the
+    // configured provider key from the worker environment.
     const systemRunId = `run_${randomUUID()}`;
     const systemSandbox = new RecordingSandboxDriver();
 
@@ -188,9 +188,13 @@ describe("worker run-one orchestration", () => {
     });
 
     expect(result).toEqual({ processed: true, runId: systemRunId });
-    // full_access can be grace-eligible for UUID tenants; a system org keeps the
-    // simple one-shot lifecycle, so the sandbox is deleted on finish.
-    expect(systemSandbox.deletedSandboxIds).toEqual(["sandbox_1"]);
+    expect(systemSandbox.createdSandboxInputs[0]).toMatchObject({
+      persistent: true,
+      autoDeleteIntervalMinutes: 90,
+      autoStopIntervalMinutes: 15
+    });
+    expect(systemSandbox.suspendedSandboxIds).toEqual(["sandbox_1"]);
+    expect(systemSandbox.deletedSandboxIds).toEqual([]);
 
     const client = await pool.connect();
     try {
@@ -202,10 +206,26 @@ describe("worker run-one orchestration", () => {
         expect(run?.status).toBe("completed");
         // No uuid error surfaced as a failure reason.
         expect(run?.failureReason ?? "").not.toContain("uuid");
-        expect(events.at(-1)?.eventType).toBe("run.completed");
-        // Stayed ephemeral: never promoted to a resumable session.
+        expect(events.map((event) => event.eventType)).toEqual(
+          expect.arrayContaining(["run.completed", "sandbox.parked"])
+        );
+        expect(events.at(-1)?.eventType).toBe("sandbox.parked");
         const session = await repo.findSessionByRunId(systemRunId, "org_system");
-        expect(session).toBeUndefined();
+        expect(session).toMatchObject({
+          originRunId: systemRunId,
+          sandboxId: "sandbox_1",
+          sandboxState: "suspended",
+          status: "active",
+          turnCount: 1
+        });
+        const turns = await repo.listTurns(session!.id, "org_system");
+        expect(turns).toEqual([
+          expect.objectContaining({
+            runId: systemRunId,
+            turnNumber: 1,
+            prompt: "Create reports/system-smoke.txt and summarize the change"
+          })
+        ]);
       });
     } finally {
       client.release();
@@ -689,16 +709,29 @@ interface RecordingSandboxDriverOptions {
 
 class RecordingSandboxDriver implements WorkerSandboxDriver {
   readonly createdEnvSnapshots: Array<Record<string, string>> = [];
+  readonly createdSandboxInputs: Array<{
+    name: string;
+    env?: Record<string, string>;
+    persistent?: boolean;
+    autoStopIntervalMinutes?: number;
+    autoDeleteIntervalMinutes?: number;
+  }> = [];
   readonly commands: string[] = [];
   readonly deletedSandboxIds: string[] = [];
+  readonly resumedSandboxIds: string[] = [];
+  readonly suspendedSandboxIds: string[] = [];
 
   constructor(private readonly options: RecordingSandboxDriverOptions = {}) {}
 
   async createSandbox(input: {
     name: string;
     env?: Record<string, string>;
+    persistent?: boolean;
+    autoStopIntervalMinutes?: number;
+    autoDeleteIntervalMinutes?: number;
   }): Promise<{ id: string; name?: string }> {
     this.createdEnvSnapshots.push(input.env ?? {});
+    this.createdSandboxInputs.push(input);
     return { id: "sandbox_1", name: input.name };
   }
 
@@ -764,6 +797,14 @@ class RecordingSandboxDriver implements WorkerSandboxDriver {
 
   async deleteSandbox(sandboxId: string): Promise<void> {
     this.deletedSandboxIds.push(sandboxId);
+  }
+
+  async suspendSandbox(sandboxId: string): Promise<void> {
+    this.suspendedSandboxIds.push(sandboxId);
+  }
+
+  async resumeSandbox(sandboxId: string): Promise<void> {
+    this.resumedSandboxIds.push(sandboxId);
   }
 }
 
