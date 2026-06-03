@@ -1,84 +1,311 @@
 # AgentRouter TypeScript SDK
 
-Run, **continue**, and stream AgentRouter coding-agent runs from TypeScript. A run id is the conversation handle — start with `createRun`, then continue the same conversation by that id.
+[![npm version](https://img.shields.io/npm/v/@agentrouterhq/sdk.svg)](https://www.npmjs.com/package/@agentrouterhq/sdk)
+[![license](https://img.shields.io/npm/l/@agentrouterhq/sdk.svg)](https://github.com/perixtar/AgentRouter/blob/main/LICENSE)
+[![types](https://img.shields.io/badge/types-TypeScript-3178c6)](https://github.com/perixtar/AgentRouter)
+
+The TypeScript client for AgentRouter, a self-hosted runtime for running Codex
+and Claude Code agents in secure sandboxes.
+
+Use the SDK to create agent runs, stream observable progress, continue a
+conversation by run id, fetch artifacts, and control long-running coding-agent
+workflows from your app, CLI, or CI.
+
+## Installation
+
+```sh
+npm install @agentrouterhq/sdk
+```
+
+```sh
+pnpm add @agentrouterhq/sdk
+```
+
+```sh
+yarn add @agentrouterhq/sdk
+```
+
+## Requirements
+
+- A running AgentRouter API, usually `http://127.0.0.1:8787` for local
+  self-hosting.
+- An `AGENTROUTER_API_KEY` bearer token configured on the AgentRouter API.
+- Provider credentials on the runtime side, such as `OPENAI_API_KEY`,
+  `CODEX_API_KEY`, or `ANTHROPIC_API_KEY`.
+- A server-side TypeScript or JavaScript runtime with `fetch`.
+
+This SDK does not call OpenAI, Anthropic, Daytona, or R2 directly. It talks to
+your AgentRouter API, and the runtime keeps provider keys server-side.
+
+## Quickstart
 
 ```ts
-import { agentrouter, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
+import { agentrouter, codex, runAgent } from "@agentrouterhq/sdk";
 
-const ar = agentrouter({
+const client = agentrouter({
   baseUrl: "http://127.0.0.1:8787",
   apiKey: process.env.AGENTROUTER_API_KEY!
 });
 
 const result = await runAgent({
-  client: ar,
-  task: "Create reports/agent-smoke.txt",
+  client,
+  task: "Inspect this repo and summarize the test strategy.",
   runtime: codex({ mode: "default", model: "gpt-4o" })
+});
+
+console.log(result.status);
+console.log(result.text);
+```
+
+`runAgent` creates a run, waits until it reaches a terminal state, and returns
+the final session snapshot:
+
+```ts
+result.id;               // run id
+result.status;           // completed | failed | cancelled
+result.text;             // final agent response text, when available
+result.artifacts.items;  // generated logs, patches, and workspace artifacts
+result.eventCursor;      // last observed event sequence
+```
+
+## Streaming a run
+
+Use `streamAgent` when you want progress updates while the sandboxed agent is
+working.
+
+```ts
+import { agentrouter, codex, streamAgent } from "@agentrouterhq/sdk";
+
+const client = agentrouter({
+  baseUrl: process.env.AGENTROUTER_API_BASE_URL ?? "http://127.0.0.1:8787",
+  apiKey: process.env.AGENTROUTER_API_KEY!
+});
+
+const stream = await streamAgent({
+  client,
+  task: "Create reports/agent-smoke.txt and explain what you changed.",
+  runtime: codex({ mode: "full_access" }),
+  pollIntervalMs: 1000,
+  maxWaitMs: 10 * 60 * 1000
+});
+
+for await (const part of stream.fullStream) {
+  if (part.type === "progress") console.log("process:", part.text);
+  if (part.type === "message") console.log("agent:", part.text);
+  if (part.type === "text") process.stdout.write(part.text);
+  if (part.type === "error") console.error(part.text);
+}
+
+const final = await stream.finalResult;
+console.log(final.status);
+```
+
+`fullStream` emits safe progress summaries, messages, final text, errors, and
+terminal status. It does not expose hidden model chain-of-thought.
+
+If you only want final text chunks:
+
+```ts
+for await (const text of stream.textStream) {
+  process.stdout.write(text);
+}
+```
+
+## Continue a conversation
+
+AgentRouter can keep a sandbox and provider thread alive after a run finishes.
+The first run id becomes the conversation handle.
+
+```ts
+import { agentrouter, codex, continueAgent, runAgent } from "@agentrouterhq/sdk";
+
+const client = agentrouter({
+  baseUrl: "http://127.0.0.1:8787",
+  apiKey: process.env.AGENTROUTER_API_KEY!
+});
+
+const firstTurn = await runAgent({
+  client,
+  task: "Create src/fib.ts with a fib(n) function.",
+  runtime: codex({ mode: "full_access" })
+});
+
+const secondTurn = await continueAgent({
+  client,
+  runId: firstTurn.id,
+  message: "Now add tests for fib(n)."
+});
+
+for await (const part of secondTurn.fullStream) {
+  if (part.type === "progress") console.log(part.text);
+  if (part.type === "text") process.stdout.write(part.text);
+}
+
+await client.closeRun(firstTurn.id);
+```
+
+You can also continue and wait in one call:
+
+```ts
+const result = await runAgent({
+  client,
+  continueRun: firstTurn.id,
+  message: "Add edge-case tests for n = 0 and n = 1."
+});
+```
+
+## Claude Code runs
+
+Use `claudeCode` instead of `codex` to run the same workflow through Claude
+Code.
+
+```ts
+import { agentrouter, claudeCode, runAgent } from "@agentrouterhq/sdk";
+
+const client = agentrouter({
+  baseUrl: "http://127.0.0.1:8787",
+  apiKey: process.env.AGENTROUTER_API_KEY!
+});
+
+const result = await runAgent({
+  client,
+  task: "Review the current repository and suggest the highest-impact cleanup.",
+  runtime: claudeCode({ permissionMode: "default", model: "claude-sonnet-4-6" })
 });
 
 console.log(result.text);
 ```
 
-## Multi-turn: continue a conversation by run id
+## Low-level client
 
-`POST /v1/runs` is unchanged (returns a `runId`). To add a follow-up turn, continue **by that run id** — it resumes the same sandbox + Codex thread (within the grace window) so turn 2 sees turn 1's files and context.
+The helper functions are built on top of a small typed client. Use it directly
+when you need more control.
 
 ```ts
-// Turn 1
-const run = await ar.createRun({
-  task: "Write fib.py with a fib(n) function",
-  runtime: codex({ mode: "full_access" })
+const run = await client.createRun({
+  task: "Run the test suite and summarize failures.",
+  runtime: codex({ mode: "read_only" }),
+  metadata: { source: "ci" },
+  idempotencyKey: "pr-123-review"
 });
-// …wait for `run` to complete…
 
-// Turn 2 — continue by the run id
-const turn2 = await ar.continueRun(run.id, "Now add a test for it");
-// → { runId, turnNumber: 2, conversationId: run.id }
+for await (const event of client.streamRun(run.id)) {
+  console.log(event.sequence, event.type);
+}
 
-// Inspect the whole conversation
-const { conversationId, items } = await ar.getRunTurns(run.id);
-
-// Reclaim the sandbox immediately when you're done
-await ar.closeRun(run.id);
+const session = await client.getRunSession(run.id);
+const artifacts = await client.listRunArtifacts(run.id);
 ```
 
-One-call continue-and-wait, or stream the new turn:
+Available client methods:
+
+| Method | Purpose |
+| --- | --- |
+| `createRun` | Queue a new agent run |
+| `createRunAndWait` | Queue a run and wait for the final session |
+| `getRun`, `listRuns`, `cancelRun` | Inspect and control runs |
+| `listRunEvents`, `streamRun` | Read observable run events |
+| `getRunSession` | Get final response, event cursor, and artifact manifest |
+| `listRunArtifacts`, `downloadArtifact` | Inspect and download artifacts |
+| `continueRun`, `getRunTurns`, `closeRun` | Continue or close a run-id conversation |
+| `createSession`, `sendMessage`, `streamSession` | Lower-level session API |
+
+## Runtime options
+
+Codex:
 
 ```ts
-// continue + wait for the new turn to finish
-const result = await runAgent({
-  client: ar,
-  continueRun: run.id,        // the conversation handle
-  message: "Now add a docstring"
+codex({ mode: "default", model: "gpt-4o" });
+codex({ mode: "read_only" });
+codex({ mode: "full_access" });
+codex({ mode: "auto_review" });
+```
+
+Claude Code:
+
+```ts
+claudeCode({ permissionMode: "default" });
+claudeCode({ permissionMode: "plan" });
+claudeCode({ permissionMode: "acceptEdits" });
+claudeCode({ permissionMode: "bypassPermissions" });
+```
+
+## Custom headers and fetch
+
+Use `defaultHeaders` when your self-hosted deployment needs per-client headers,
+for example tenant routing or internal request metadata.
+
+```ts
+const client = agentrouter({
+  baseUrl: "https://agentrouter.example.com",
+  apiKey: process.env.AGENTROUTER_API_KEY!,
+  defaultHeaders: {
+    "x-workspace-id": "workspace_123"
+  }
+});
+```
+
+Use `fetchImpl` when your runtime needs a custom fetch implementation.
+
+```ts
+const client = agentrouter({
+  apiKey: process.env.AGENTROUTER_API_KEY!,
+  fetchImpl: customFetch
+});
+```
+
+## Error handling
+
+API errors and wait timeouts throw `AgentRouterError`.
+
+```ts
+import { AgentRouterError, agentrouter, codex, runAgent } from "@agentrouterhq/sdk";
+
+const client = agentrouter({
+  baseUrl: "http://127.0.0.1:8787",
+  apiKey: process.env.AGENTROUTER_API_KEY!
 });
 
-// or stream the new turn's events/text
-import { continueAgent } from "@agentrouterhq/sdk";
-const stream = await continueAgent({ client: ar, runId: run.id, message: "Refactor it" });
-for await (const part of stream.fullStream) {
-  if (part.type === "progress") console.log(part.text);
-  if (part.type === "text") process.stdout.write(part.text);
+try {
+  await runAgent({
+    client,
+    task: "Run tests.",
+    runtime: codex({ mode: "default" }),
+    maxWaitMs: 60_000
+  });
+} catch (error) {
+  if (error instanceof AgentRouterError) {
+    console.error(error.code);
+    console.error(error.statusCode);
+    console.error(error.details);
+  } else {
+    throw error;
+  }
 }
 ```
 
-> Note: `runAgent` no longer accepts a `sessionId`. Resume is now `runAgent({ continueRun, message })` — it actually sends the message and waits for the **new** turn (the old `sessionId` shape passed a runId into a run endpoint and only waited, never continued).
+Common SDK-side error codes:
 
-## Streaming a single run
+| Code | Meaning |
+| --- | --- |
+| `wait_timeout` | A run did not reach a terminal state before `maxWaitMs` |
+| `invalid_run_agent_request` | `runAgent` received neither a new task nor a continuation message |
 
-```ts
-const stream = await streamAgent({
-  client: ar,
-  task: "Inspect the repo and summarize the change",
-  runtime: codex({ mode: "default" })
-});
+Server-side API errors keep the error code returned by the AgentRouter API.
 
-for await (const part of stream.fullStream) {
-  if (part.type === "progress") console.log(part.text);
-  if (part.type === "text") process.stdout.write(part.text);
-}
-```
+## Security notes
 
-`fullStream` exposes safe progress summaries and observable activity. It does not expose raw hidden model chain-of-thought.
+- Keep `AGENTROUTER_API_KEY` on the server side. Do not ship it to an
+  untrusted browser client.
+- Provider keys stay in the AgentRouter runtime environment, not in SDK calls.
+- `fullStream` exposes observable progress and final output, not hidden
+  chain-of-thought.
+- Agent commands run inside the sandbox provider configured by your
+  self-hosted runtime.
 
-Use `defaultHeaders` when your self-hosted deployment needs additional
-per-client headers.
+## Links
+
+- [GitHub repository](https://github.com/perixtar/AgentRouter)
+- [Self-hosting guide](https://github.com/perixtar/AgentRouter/blob/main/docs/self-hosting.md)
+- [Examples](https://github.com/perixtar/AgentRouter/tree/main/examples)
+- [Security policy](https://github.com/perixtar/AgentRouter/blob/main/SECURITY.md)
