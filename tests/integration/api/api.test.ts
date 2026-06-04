@@ -650,6 +650,161 @@ describe("AgentRouter API", () => {
   });
 });
 
+// ── Multi-tenant org assertion (managed-cloud path), CONFIG-GATED. ──
+describe("AgentRouter API — web-service-token org assertion", () => {
+  const config = parseAgentRouterEnv(process.env);
+  const pool = new Pool({ connectionString: config.databaseUrl });
+  const webServiceToken = "arw_test_web_service_token";
+
+  // Two independent UUID tenants to prove isolation.
+  const orgA = randomUUID();
+  const orgB = randomUUID();
+
+  // One server WITH the web token (multi-tenant), one WITHOUT (single-tenant
+  // default) — same DB schema so cross-server visibility can be checked.
+  const schema = `${config.testResourcePrefix}_${randomUUID().replaceAll("-", "_")}`;
+  const multiTenant = buildApiServer({ pool, schema, apiKey: config.apiKey, webServiceToken });
+  const singleTenant = buildApiServer({ pool, schema, apiKey: config.apiKey });
+
+  beforeAll(async () => {
+    const client = await pool.connect();
+    try {
+      await applyPhase1Migrations(client, schema);
+    } finally {
+      client.release();
+    }
+  });
+
+  afterAll(async () => {
+    const client = await pool.connect();
+    try {
+      await dropSchema(client, schema);
+    } finally {
+      client.release();
+      await multiTenant.close();
+      await singleTenant.close();
+      await pool.end();
+    }
+  });
+
+  function orgHeaders(orgId: string): Record<string, string> {
+    return {
+      authorization: `Bearer ${webServiceToken}`,
+      "x-ar-org-id": orgId
+    };
+  }
+
+  async function createRunAs(server: typeof multiTenant, headers: Record<string, string>) {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers,
+      payload: { task: "isolation probe", runtime: { kind: "codex", mode: "default" } }
+    });
+    return response;
+  }
+
+  it("(a) web token + valid X-AR-Org-Id resolves to that org and persists it", async () => {
+    const response = await createRunAs(multiTenant, orgHeaders(orgA));
+    expect(response.statusCode).toBe(201);
+    const runId = response.json().id;
+
+    // The persisted run's org_id is the asserted UUID — not the system sentinel.
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const row = await client.query<{ org_id: string }>(
+          "select org_id from runs where id = $1",
+          [runId]
+        );
+        expect(row.rows[0]?.org_id).toBe(orgA);
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  it("(a) web token WITHOUT a valid-UUID X-AR-Org-Id is rejected (401)", async () => {
+    const missing = await multiTenant.inject({
+      method: "GET",
+      url: "/v1/runs",
+      headers: { authorization: `Bearer ${webServiceToken}` }
+    });
+    expect(missing.statusCode).toBe(401);
+
+    const garbage = await multiTenant.inject({
+      method: "GET",
+      url: "/v1/runs",
+      headers: { authorization: `Bearer ${webServiceToken}`, "x-ar-org-id": "not-a-uuid" }
+    });
+    expect(garbage.statusCode).toBe(401);
+  });
+
+  it("(b) org A cannot read org B's run (cross-tenant 404 + list isolation)", async () => {
+    const created = await createRunAs(multiTenant, orgHeaders(orgA));
+    expect(created.statusCode).toBe(201);
+    const runIdA = created.json().id;
+
+    // Direct fetch of A's run while asserting org B → 404.
+    const crossGet = await multiTenant.inject({
+      method: "GET",
+      url: `/v1/runs/${runIdA}`,
+      headers: orgHeaders(orgB)
+    });
+    expect(crossGet.statusCode).toBe(404);
+
+    // B's run list never contains A's run.
+    const listB = await multiTenant.inject({
+      method: "GET",
+      url: "/v1/runs",
+      headers: orgHeaders(orgB)
+    });
+    expect(listB.statusCode).toBe(200);
+    expect(listB.json().items.map((r: { id: string }) => r.id)).not.toContain(runIdA);
+
+    // A can still read its own run.
+    const selfGet = await multiTenant.inject({
+      method: "GET",
+      url: `/v1/runs/${runIdA}`,
+      headers: orgHeaders(orgA)
+    });
+    expect(selfGet.statusCode).toBe(200);
+  });
+
+  it("(c) single-tenant default is unchanged: the web token is NOT accepted, only the api key works", async () => {
+    // No web token configured → the cloud token is just an unknown bearer (401).
+    const asWebToken = await singleTenant.inject({
+      method: "GET",
+      url: "/v1/runs",
+      headers: orgHeaders(orgA)
+    });
+    expect(asWebToken.statusCode).toBe(401);
+
+    // The configured api key still works and resolves to the system org.
+    const created = await singleTenant.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: { task: "single tenant probe", runtime: { kind: "codex", mode: "default" } }
+    });
+    expect(created.statusCode).toBe(201);
+    const runId = created.json().id;
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const row = await client.query<{ org_id: string }>(
+          "select org_id from runs where id = $1",
+          [runId]
+        );
+        expect(row.rows[0]?.org_id).toBe("org_system");
+      });
+    } finally {
+      client.release();
+    }
+  });
+});
+
 function authHeaders(apiKey: string, idempotencyKey?: string): Record<string, string> {
   return {
     authorization: `Bearer ${apiKey}`,

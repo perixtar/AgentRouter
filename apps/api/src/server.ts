@@ -19,6 +19,15 @@ export interface BuildApiServerInput {
   pool: Pool;
   schema: string;
   apiKey: string;
+  /**
+   * Optional shared web→API service token (the managed-cloud path). When set
+   * AND the request's bearer equals it AND a valid-UUID `X-AR-Org-Id` header is
+   * present, that org is trusted as the request's tenant (the Next.js web server
+   * asserts the logged-in user's real org). When UNSET the API behaves exactly
+   * as a single-tenant self-hosted runtime — only the `apiKey` bearer is
+   * accepted and it resolves to the fixed system org.
+   */
+  webServiceToken?: string;
   artifactBytes?: {
     getObjectBytes(key: string): Promise<Buffer>;
   };
@@ -597,7 +606,26 @@ async function authenticate(
   }
   const bearer = authorization.slice("Bearer ".length).trim();
 
-  // Self-hosted auth: one configured bearer token for all local clients.
+  // (a) Managed-cloud org assertion — CONFIG-GATED. Only active when a web
+  // service token is configured. The trusted Next.js web server presents this
+  // token and asserts the logged-in user's real org via X-AR-Org-Id (a UUID).
+  // When the token is unset this whole branch is skipped, so the public OSS
+  // default stays single-tenant (only path (b) below).
+  const webServiceToken = input.webServiceToken ?? process.env.AGENTROUTER_WEB_SERVICE_TOKEN;
+  if (webServiceToken && timingSafeEqualStr(bearer, webServiceToken)) {
+    const orgId = assertedOrgId(request);
+    if (!orgId) {
+      throw new ApiError(
+        401,
+        "unauthorized",
+        "Web service token requires a valid-UUID X-AR-Org-Id header"
+      );
+    }
+    return { orgId };
+  }
+
+  // (b) Self-hosted auth: one configured bearer token for all local clients.
+  // Resolves to a fixed system org so its runs are still tenant-scoped.
   if (timingSafeEqualStr(bearer, input.apiKey)) {
     return { orgId: SYSTEM_ORG_ID };
   }
@@ -607,6 +635,20 @@ async function authenticate(
 
 /** Fixed org for the self-hosted `AGENTROUTER_API_KEY` path. */
 const SYSTEM_ORG_ID = "org_system";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The asserted tenant org from the `X-AR-Org-Id` header. Only honored for the
+ * web-service-token path; must be a valid UUID (a real cloud tenant), so an
+ * absent/garbage header can never be trusted as an org.
+ */
+function assertedOrgId(request: FastifyRequest): string | undefined {
+  const header = request.headers["x-ar-org-id"];
+  const value = Array.isArray(header) ? header[0] : header;
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return UUID_RE.test(trimmed) ? trimmed : undefined;
+}
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   const bufA = Buffer.from(a);

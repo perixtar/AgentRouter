@@ -23,6 +23,8 @@ const server = buildApiServer({
   pool,
   schema,
   apiKey: config.apiKey,
+  // Optional managed-cloud org-assertion token. Unset → single-tenant default.
+  webServiceToken: process.env.AGENTROUTER_WEB_SERVICE_TOKEN,
   artifactBytes: new R2ArtifactStore(config.r2)
 });
 
