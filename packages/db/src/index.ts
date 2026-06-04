@@ -47,10 +47,29 @@ export async function dropSchema(client: PoolClient, schema: string): Promise<vo
   await client.query(`drop schema if exists ${quoteIdent(schema)} cascade`);
 }
 
-export async function applyPhase1Migrations(client: PoolClient, schema: string): Promise<void> {
-  await client.query(`create schema if not exists ${quoteIdent(schema)}`);
+/**
+ * Fixed advisory-lock key that serializes concurrent migration runs. When the
+ * API and worker boot at the same moment against a fresh schema they both call
+ * `applyPhase1Migrations`; without this lock the two `create index` statements
+ * race and the loser crashes with `duplicate key ... already exists` (Postgres
+ * `IF NOT EXISTS` checks then creates non-atomically). The lock makes the
+ * second starter wait for the first to finish, after which every statement is a
+ * no-op. The key is an arbitrary constant — global (not schema-scoped) so any
+ * two processes on the same database serialize.
+ */
+const MIGRATION_ADVISORY_LOCK_KEY = 4297210001;
 
-  await withSearchPath(client, schema, async () => {
+export async function applyPhase1Migrations(client: PoolClient, schema: string): Promise<void> {
+  // Serialize concurrent migrators on the same database (API + worker cold
+  // start). Taken FIRST — before the schema is even created — so the schema
+  // creation, the `create index` statements, and the constraint DDL all run
+  // under one process at a time. The lock is released in `finally` even if a
+  // statement throws.
+  await client.query("select pg_advisory_lock($1)", [MIGRATION_ADVISORY_LOCK_KEY]);
+  try {
+    await client.query(`create schema if not exists ${quoteIdent(schema)}`);
+
+    await withSearchPath(client, schema, async () => {
     // Sessions own a persistent sandbox; turns map a user message to a run.
     await client.query(`
       create table if not exists sessions (
@@ -309,7 +328,10 @@ export async function applyPhase1Migrations(client: PoolClient, schema: string):
       "run_attempts",
       "run_attempts_runtime_kind_mode_check"
     );
-  });
+    });
+  } finally {
+    await client.query("select pg_advisory_unlock($1)", [MIGRATION_ADVISORY_LOCK_KEY]);
+  }
 }
 
 async function addRuntimeModeConstraint(
