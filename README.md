@@ -289,6 +289,31 @@ The control-plane event chain exists so products can show more than logs:
 | `execution.completed` / `execution.failed` | `execution` | Shows whether sandbox execution finished or failed. |
 | `agent.no_progress` | `no_progress` | Surfaces suspected stuck loops: repeated failed commands, repeated edits, or long output without state transitions. |
 
+### Stuck-loop detection
+
+The production failure mode is simple: a coding agent can keep running the same
+failed command, churn the same edit, or produce a lot of output without moving
+the run forward. Logs alone make that hard for a product to act on.
+
+AgentRouter treats this as runtime state. When the worker sees suspicious
+patterns in the real Codex or Claude Code stream, it persists
+`agent.no_progress` in the run record and the TypeScript SDK exposes it as:
+
+```ts
+for await (const part of stream.fullStream) {
+  if (part.type === "no_progress") {
+    console.warn(part.signal, part.text);
+    // Show a warning, request approval, cancel, retry, or continue from state.
+  }
+}
+```
+
+Try the recipe:
+
+```sh
+pnpm example:recipe:no-progress
+```
+
 Manual approval:
 
 ```ts

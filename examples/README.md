@@ -60,6 +60,7 @@ pnpm example:quickstart:run
 | `pnpm example:recipe:artifacts` | Yes | R2 artifacts, workspace file index, workspace patch, stdout download |
 | `pnpm example:recipe:runtime-modes` | Yes | Codex and Claude Code runtime mode selection |
 | `pnpm example:recipe:approval-events` | Yes | Manual action approval, policy decisions, and execution event streaming |
+| `pnpm example:recipe:no-progress` | Yes | Stuck-loop detection through `agent.no_progress` / `part.type === "no_progress"` |
 | `pnpm example:recipe:low-level` | No | Direct client methods: create, list, events, cancel, get |
 | `pnpm example:recipe:errors` | No | `AgentRouterError` handling for API validation failures |
 | `pnpm example:recipe:tool-boundary` | No | Current custom-tool boundary and future MCP gateway shape |
@@ -87,6 +88,19 @@ Use the approval recipe when you want to see the full control-plane chain:
 ```sh
 pnpm example:recipe:approval-events
 ```
+
+Use the no-progress recipe when you want to see how a product detects an agent
+that is stuck repeating work:
+
+```sh
+pnpm example:recipe:no-progress
+```
+
+Problem: long-running coding agents can repeat the same failed command, churn
+the same edit, or produce output without meaningful state changes. Solution:
+AgentRouter emits `agent.no_progress` into the run record and the SDK exposes it
+as `part.type === "no_progress"` so your app can warn, cancel, retry, request
+approval, or let the user continue from the current sandbox state.
 
 Event purposes:
 

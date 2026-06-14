@@ -138,6 +138,21 @@ sequence number, original payload, artifact references, or audit trail.
 | `agent.response` | `text` | Final normalized agent response text. |
 | `run.completed`, `run.failed`, `run.cancelled` | `done` or `error` | Terminal run state. |
 
+No-progress handling example:
+
+```ts
+for await (const part of stream.fullStream) {
+  if (part.type === "no_progress") {
+    console.warn(`Agent may be stuck: ${part.signal} - ${part.text}`);
+    // Your app can cancel the run, ask for approval, or let the user continue.
+  }
+}
+```
+
+The raw `agent.no_progress` event stays in `stream.events`, session manifests,
+and artifact-backed event archives, so dashboards and audit views can replay
+when the loop signal happened.
+
 Manual approval example:
 
 ```ts
