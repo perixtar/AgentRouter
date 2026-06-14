@@ -3,13 +3,15 @@ import type { Pool, PoolClient } from "pg";
 import type { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import {
   bindCanonicalAction,
+  createNormalizedAgentEventExtractor,
   extractAgentResponseFromStdout,
   extractNormalizedAgentEventsFromStdout,
   sanitizeProviderStdoutForArchive,
   type ActionApprovalDecision,
   type ActionApprovalMode,
   type ActionPolicyDecision,
-  type ControlPlaneAction
+  type ControlPlaneAction,
+  type NormalizedAgentEventExtractor
 } from "@agentrouter/core";
 import {
   buildCredentialBoundaryProbeCommand,
@@ -1212,11 +1214,12 @@ async function executeProviderCommand(
   let stdout = "";
   let stderr = "";
   let pendingStdout = "";
+  const eventExtractor = createNormalizedAgentEventExtractor(runtime.provider);
 
   const flushStdoutLine = async (line: string): Promise<void> => {
     if (!line.trim()) return;
     assertNoCredentialLeaks(line, runtime.credentialCanaries, "provider output");
-    await appendNormalizedAgentEvents(input, runId, runtime.eventSource, line);
+    await appendNormalizedAgentEvents(input, runId, runtime.eventSource, line, eventExtractor);
   };
 
   const result = await input.sandbox.executeCommandStreaming(
@@ -1299,9 +1302,12 @@ async function appendNormalizedAgentEvents(
   input: RunOneWorkerIterationInput,
   runId: string,
   providerSource: string,
-  stdout: string
+  stdout: string,
+  extractor?: NormalizedAgentEventExtractor
 ): Promise<void> {
-  const events = extractNormalizedAgentEventsFromStdout(providerSource as RuntimeProvider, stdout);
+  const events = extractor
+    ? stdout.split(/\r?\n/).flatMap((line) => extractor.appendLine(line))
+    : extractNormalizedAgentEventsFromStdout(providerSource as RuntimeProvider, stdout);
   if (events.length === 0) return;
 
   await withClient(input, async (client) => {

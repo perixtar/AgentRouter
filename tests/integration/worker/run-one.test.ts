@@ -335,6 +335,170 @@ describe("worker run-one orchestration", () => {
     }
   }, 60_000);
 
+  it("persists a Codex no-progress event for repeated failed commands", async () => {
+    const loopRunId = `run_${randomUUID()}`;
+    const loopSandbox = new StreamingRecordingSandboxDriver({
+      stdoutChunks: [
+        `${JSON.stringify({ type: "thread.started", thread_id: "thread_loop" })}\n`,
+        ...Array.from(
+          { length: 3 },
+          () =>
+            `${JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                command: "pnpm test",
+                exit_code: 1,
+                stdout: "1 failing test",
+                stderr: "Expected 1 to be 2"
+              }
+            })}\n`
+        ),
+        `${JSON.stringify({ type: "result", result: "done" })}\n`
+      ]
+    });
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: loopRunId,
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          runtimeModel: "gpt-4o",
+          input: {
+            task: "Run tests and fix failures",
+            runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
+          },
+          promptSummary: "Run tests and fix failures"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    await expect(
+      runOneWorkerIteration({
+        pool,
+        schema,
+        workerId: `worker_${randomUUID()}`,
+        sandbox: loopSandbox,
+        artifactStore: store,
+        testResourcePrefix: config.testResourcePrefix,
+        codexApiKey: config.codexApiKey,
+        baseEnv: process.env
+      })
+    ).resolves.toEqual({ processed: true, runId: loopRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const events = await new RunRepository(client).listEventsInternal({ runId: loopRunId });
+        const noProgress = eventOf(events, "agent.no_progress");
+        expect(noProgress.source).toBe("codex");
+        expect(noProgress.providerEventType).toBe("item.completed");
+        expect(noProgress.payload).toMatchObject({
+          provider: "codex",
+          signal: "repeated_command",
+          reason: "Repeated command failed with similar output",
+          command: "pnpm test",
+          occurrences: 3,
+          exitCode: 1
+        });
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(loopRunId);
+    }
+  }, 60_000);
+
+  it("persists a Claude Code no-progress event for repeated edit attempts", async () => {
+    const loopRunId = `run_${randomUUID()}`;
+    const editToolUse = {
+      type: "tool_use",
+      name: "Edit",
+      input: {
+        file_path: "/repo/src/service.ts",
+        old_string: "return false;",
+        new_string: "return true;"
+      }
+    };
+    const loopSandbox = new StreamingRecordingSandboxDriver({
+      stdoutChunks: [
+        `${JSON.stringify({ type: "system", subtype: "init", session_id: "sess_loop" })}\n`,
+        ...Array.from(
+          { length: 3 },
+          () =>
+            `${JSON.stringify({
+              type: "assistant",
+              message: {
+                content: [editToolUse]
+              }
+            })}\n`
+        ),
+        `${JSON.stringify({ type: "result", result: "done" })}\n`
+      ]
+    });
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: loopRunId,
+          orgId: "org_test",
+          runtimeKind: "claude_code",
+          runtimeMode: "acceptEdits",
+          runtimeModel: "claude-sonnet-4-6",
+          input: {
+            task: "Edit the service implementation",
+            runtime: {
+              kind: "claude_code",
+              permissionMode: "acceptEdits",
+              model: "claude-sonnet-4-6"
+            }
+          },
+          promptSummary: "Edit the service implementation"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    await expect(
+      runOneWorkerIteration({
+        pool,
+        schema,
+        workerId: `worker_${randomUUID()}`,
+        sandbox: loopSandbox,
+        artifactStore: store,
+        testResourcePrefix: config.testResourcePrefix,
+        codexApiKey: config.codexApiKey,
+        anthropicApiKey: "sk-ant-worker-canary",
+        baseEnv: process.env
+      })
+    ).resolves.toEqual({ processed: true, runId: loopRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const events = await new RunRepository(client).listEventsInternal({ runId: loopRunId });
+        const noProgress = eventOf(events, "agent.no_progress");
+        expect(noProgress.source).toBe("claude_code");
+        expect(noProgress.providerEventType).toBe("assistant");
+        expect(noProgress.payload).toMatchObject({
+          provider: "claude_code",
+          signal: "repeated_edit",
+          reason: "Repeated file edit did not produce meaningful progress",
+          path: "/repo/src/service.ts",
+          occurrences: 3
+        });
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(loopRunId);
+    }
+  }, 60_000);
+
   it("claims a Claude Code run, launches it in a sandbox, writes events, archives artifacts, and cleans up", async () => {
     const claudeRunId = `run_${randomUUID()}`;
     const claudeSandbox = new RecordingSandboxDriver();

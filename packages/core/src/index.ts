@@ -116,6 +116,7 @@ export type NormalizedAgentEventType =
   | "agent.started"
   | "agent.progress"
   | "agent.message"
+  | "agent.no_progress"
   | "agent.completed"
   | "agent.error";
 
@@ -124,6 +125,10 @@ export interface NormalizedAgentEvent {
   visibility: "public";
   providerEventType?: string;
   payload: Record<string, unknown>;
+}
+
+export interface NormalizedAgentEventExtractor {
+  appendLine(line: string): NormalizedAgentEvent[];
 }
 
 const MAX_PAYLOAD_BYTES = 32 * 1024;
@@ -218,58 +223,80 @@ export function extractNormalizedAgentEventsFromStdout(
   provider: RuntimeKind,
   stdout: string
 ): NormalizedAgentEvent[] {
+  const extractor = createNormalizedAgentEventExtractor(provider);
   const events: NormalizedAgentEvent[] = [];
-  let sawStarted = false;
 
   for (const line of stdout.split(/\r?\n/)) {
-    const event = parseJsonLine(line);
-    if (!event) continue;
-
-    const providerEventType = typeof event.type === "string" ? event.type : undefined;
-    const startedPayload = normalizeStartedPayload(provider, event);
-    if (startedPayload && !sawStarted) {
-      events.push({
-        type: "agent.started",
-        visibility: "public",
-        providerEventType,
-        payload: startedPayload
-      });
-      sawStarted = true;
-    }
-
-    const messageText =
-      extractCodexAgentMessage(event) ??
-      extractClaudeAssistantMessage(event) ??
-      extractGenericProviderMessage(event);
-    if (messageText) {
-      events.push({
-        type: "agent.message",
-        visibility: "public",
-        providerEventType,
-        payload: { provider, text: messageText }
-      });
-    }
-
-    const progressSummary = extractSafeProgressSummary(event);
-    if (progressSummary) {
-      events.push({
-        type: "agent.progress",
-        visibility: "public",
-        providerEventType,
-        payload: { provider, summary: progressSummary }
-      });
-    }
-
-    const resultEvent = normalizeProviderResult(provider, event);
-    if (resultEvent) {
-      events.push({
-        ...resultEvent,
-        providerEventType
-      });
-    }
+    events.push(...extractor.appendLine(line));
   }
 
   return events;
+}
+
+export function createNormalizedAgentEventExtractor(
+  provider: RuntimeKind
+): NormalizedAgentEventExtractor {
+  let sawStarted = false;
+  const noProgress = createNoProgressDetector(provider);
+
+  return {
+    appendLine(line: string): NormalizedAgentEvent[] {
+      const events: NormalizedAgentEvent[] = [];
+      const event = parseJsonLine(line);
+      if (!event) {
+        events.push(...noProgress.observeUnstructuredLine(line));
+        return events;
+      }
+
+      const providerEventType = typeof event.type === "string" ? event.type : undefined;
+      const startedPayload = normalizeStartedPayload(provider, event);
+      if (startedPayload && !sawStarted) {
+        events.push({
+          type: "agent.started",
+          visibility: "public",
+          providerEventType,
+          payload: startedPayload
+        });
+        sawStarted = true;
+      }
+
+      const messageText =
+        extractCodexAgentMessage(event) ??
+        extractClaudeAssistantMessage(event) ??
+        extractGenericProviderMessage(event);
+      if (messageText) {
+        events.push({
+          type: "agent.message",
+          visibility: "public",
+          providerEventType,
+          payload: { provider, text: messageText }
+        });
+      }
+
+      const progressSummary = extractSafeProgressSummary(event);
+      if (progressSummary) {
+        events.push({
+          type: "agent.progress",
+          visibility: "public",
+          providerEventType,
+          payload: { provider, summary: progressSummary }
+        });
+      }
+
+      events.push(...noProgress.observeProviderEvent(event, providerEventType));
+
+      const resultEvent = normalizeProviderResult(provider, event);
+      if (resultEvent) {
+        events.push({
+          ...resultEvent,
+          providerEventType
+        });
+      }
+
+      if (events.length > 0) noProgress.markStateTransition();
+      return events;
+    }
+  };
 }
 
 export function sanitizeProviderStdoutForArchive(stdout: string): string {
@@ -295,6 +322,298 @@ function parseJsonLine(line: string): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+type NoProgressSignal = "repeated_command" | "repeated_edit" | "long_output_without_state";
+
+interface NoProgressObservation {
+  signal: NoProgressSignal;
+  key: string;
+  providerEventType?: string;
+  payload: Record<string, unknown>;
+}
+
+interface NoProgressCounter {
+  occurrences: number;
+  emitted: boolean;
+  payload: Record<string, unknown>;
+  providerEventType?: string;
+}
+
+const NO_PROGRESS_REPEAT_THRESHOLD = 3;
+const NO_PROGRESS_UNSTRUCTURED_LINE_THRESHOLD = 50;
+
+function createNoProgressDetector(provider: RuntimeKind): {
+  observeProviderEvent(
+    event: Record<string, unknown>,
+    providerEventType?: string
+  ): NormalizedAgentEvent[];
+  observeUnstructuredLine(line: string): NormalizedAgentEvent[];
+  markStateTransition(): void;
+} {
+  const counters = new Map<string, NoProgressCounter>();
+  let unstructuredLinesWithoutState = 0;
+  let emittedLongOutput = false;
+
+  function observeObservation(observation: NoProgressObservation): NormalizedAgentEvent[] {
+    const existing = counters.get(observation.key);
+    const counter =
+      existing ??
+      ({
+        occurrences: 0,
+        emitted: false,
+        payload: observation.payload,
+        providerEventType: observation.providerEventType
+      } satisfies NoProgressCounter);
+    counter.occurrences += 1;
+    counter.payload = observation.payload;
+    counter.providerEventType = observation.providerEventType;
+    counters.set(observation.key, counter);
+
+    if (counter.emitted || counter.occurrences < NO_PROGRESS_REPEAT_THRESHOLD) return [];
+    counter.emitted = true;
+
+    return [
+      {
+        type: "agent.no_progress",
+        visibility: "public",
+        providerEventType: counter.providerEventType,
+        payload: compactRecord({
+          ...counter.payload,
+          provider,
+          signal: observation.signal,
+          occurrences: counter.occurrences
+        })
+      }
+    ];
+  }
+
+  return {
+    observeProviderEvent(event, providerEventType) {
+      unstructuredLinesWithoutState = 0;
+      emittedLongOutput = false;
+      const observations = [
+        extractCommandObservation(provider, event, providerEventType),
+        extractEditObservation(provider, event, providerEventType)
+      ].filter((item): item is NoProgressObservation => item !== undefined);
+      return observations.flatMap(observeObservation);
+    },
+    observeUnstructuredLine(line) {
+      if (!line.trim()) return [];
+      unstructuredLinesWithoutState += 1;
+      if (
+        emittedLongOutput ||
+        unstructuredLinesWithoutState < NO_PROGRESS_UNSTRUCTURED_LINE_THRESHOLD
+      ) {
+        return [];
+      }
+      emittedLongOutput = true;
+      return [
+        {
+          type: "agent.no_progress",
+          visibility: "public",
+          payload: {
+            provider,
+            signal: "long_output_without_state",
+            reason: "Long provider output period without normalized run progress",
+            outputLines: unstructuredLinesWithoutState
+          }
+        }
+      ];
+    },
+    markStateTransition() {
+      unstructuredLinesWithoutState = 0;
+      emittedLongOutput = false;
+    }
+  };
+}
+
+function extractCommandObservation(
+  provider: RuntimeKind,
+  event: Record<string, unknown>,
+  providerEventType?: string
+): NoProgressObservation | undefined {
+  const commandPayload = findCommandPayload(event);
+  if (!commandPayload) return undefined;
+
+  const command = firstString(commandPayload.command, commandPayload.cmd);
+  if (!command) return undefined;
+
+  const exitCode = firstNumber(
+    commandPayload.exitCode,
+    commandPayload.exit_code,
+    commandPayload.code
+  );
+  const output = [
+    firstString(commandPayload.stdout),
+    firstString(commandPayload.stderr),
+    firstString(commandPayload.output),
+    firstString(commandPayload.result)
+  ]
+    .filter((item): item is string => Boolean(item))
+    .join("\n");
+  const outputDigest = `sha256:${hashStableJson(compactRecord({ exitCode, output }))}`;
+  const failed = exitCode === undefined ? Boolean(output) : exitCode !== 0;
+
+  return {
+    signal: "repeated_command",
+    key: `command:${provider}:${command}:${exitCode ?? "unknown"}:${outputDigest}`,
+    providerEventType,
+    payload: compactRecord({
+      provider,
+      signal: "repeated_command",
+      reason: failed
+        ? "Repeated command failed with similar output"
+        : "Repeated command execution without visible progress",
+      command,
+      exitCode,
+      outputDigest
+    })
+  };
+}
+
+function extractEditObservation(
+  provider: RuntimeKind,
+  event: Record<string, unknown>,
+  providerEventType?: string
+): NoProgressObservation | undefined {
+  const editPayload = findEditPayload(event);
+  if (!editPayload) return undefined;
+
+  const path = firstString(
+    editPayload.path,
+    editPayload.file_path,
+    editPayload.filePath,
+    editPayload.filename
+  );
+  if (!path) return undefined;
+
+  const digestInput = compactRecord({
+    path,
+    oldString: firstString(editPayload.old_string, editPayload.oldString),
+    newString: firstString(editPayload.new_string, editPayload.newString),
+    content: firstString(editPayload.content),
+    diff: firstString(editPayload.diff),
+    patch: firstString(editPayload.patch),
+    edits: Array.isArray(editPayload.edits) ? editPayload.edits : undefined
+  });
+  const editDigest = `sha256:${hashStableJson(digestInput)}`;
+
+  return {
+    signal: "repeated_edit",
+    key: `edit:${provider}:${path}:${editDigest}`,
+    providerEventType,
+    payload: {
+      provider,
+      signal: "repeated_edit",
+      reason: "Repeated file edit did not produce meaningful progress",
+      path,
+      editDigest
+    }
+  };
+}
+
+function findCommandPayload(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const direct = commandPayloadFromRecord(event);
+  if (direct) return direct;
+
+  const item = objectRecord(event.item);
+  if (item) {
+    const fromItem = commandPayloadFromRecord(item);
+    if (fromItem) return fromItem;
+  }
+
+  const content = messageContent(event);
+  for (const part of content) {
+    const partRecord = objectRecord(part);
+    if (!partRecord) continue;
+    const fromPart = commandPayloadFromRecord(partRecord);
+    if (fromPart) return fromPart;
+  }
+
+  return undefined;
+}
+
+function findEditPayload(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const direct = editPayloadFromRecord(event);
+  if (direct) return direct;
+
+  const item = objectRecord(event.item);
+  if (item) {
+    const fromItem = editPayloadFromRecord(item);
+    if (fromItem) return fromItem;
+  }
+
+  const content = messageContent(event);
+  for (const part of content) {
+    const partRecord = objectRecord(part);
+    if (!partRecord) continue;
+    const fromPart = editPayloadFromRecord(partRecord);
+    if (fromPart) return fromPart;
+  }
+
+  return undefined;
+}
+
+function commandPayloadFromRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const toolName = firstString(record.name, record.tool, record.tool_name, record.type);
+  const input = objectRecord(record.input) ?? objectRecord(record.args);
+  const candidate = input ?? record;
+  const command = firstString(candidate.command, candidate.cmd);
+  if (!command) return undefined;
+
+  if (
+    !toolName ||
+    /bash|shell|command|exec|terminal|run/i.test(toolName) ||
+    firstString(record.type) === "command_execution"
+  ) {
+    return candidate;
+  }
+
+  return undefined;
+}
+
+function editPayloadFromRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const toolName = firstString(record.name, record.tool, record.tool_name, record.type);
+  const input = objectRecord(record.input) ?? objectRecord(record.args);
+  const candidate = input ?? record;
+  const path = firstString(candidate.path, candidate.file_path, candidate.filePath, candidate.filename);
+  if (!path) return undefined;
+
+  if (!toolName || /edit|write|patch|replace|multiedit|file_change|file_edit/i.test(toolName)) {
+    return candidate;
+  }
+
+  return undefined;
+}
+
+function messageContent(event: Record<string, unknown>): unknown[] {
+  const message = objectRecord(event.message);
+  const content = message?.content ?? event.content;
+  return Array.isArray(content) ? content : [];
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return undefined;
 }
 
 function sanitizeProviderEvent(event: Record<string, unknown>): Record<string, unknown> {

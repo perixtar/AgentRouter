@@ -173,6 +173,91 @@ describeRealE2E("real Codex API + worker E2E", () => {
     ).resolves.toEqual({ processed: false });
   }, 600_000);
 
+  it("streams no-progress signals from a real Codex run", async () => {
+    const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
+    const runtimeModel = process.env.AGENTROUTER_MODEL;
+    const controller = new AbortController();
+    const worker = runWorkerLoop({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: new DaytonaSandboxDriver({
+        apiKey: config.daytonaApiKey,
+        testResourcePrefix: config.testResourcePrefix
+      }),
+      artifactStore,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env,
+      signal: controller.signal,
+      pollIntervalMs: 250
+    });
+
+    try {
+      const stream = await streamAgent({
+        client: sdk,
+        pollIntervalMs: 500,
+        maxWaitMs: 10 * 60 * 1000,
+        task:
+          "Use the shell tool to run exactly this failing command three separate times without changing it: bash -lc 'echo AR_CODEX_LOOP && exit 1'. After the third failed attempt, run exactly: mkdir -p reports && printf 'AR_CODEX_NO_PROGRESS_E2E_OK\\n' > reports/no-progress.txt. Then summarize the change in one sentence.",
+        approvalMode: "manual",
+        runtime: codex({ mode: "full_access", ...(runtimeModel ? { model: runtimeModel } : {}) })
+      });
+      runIds.push(stream.run.id);
+
+      const events = await collectEventsAndApproveActions(sdk, stream.events);
+      const result = await stream.finalResult;
+
+      await assertSuccessfulE2ERun({
+        client: sdk,
+        session: result.session,
+        events,
+        providerSource: "codex",
+        runtimeKind: "codex",
+        marker: "AR_CODEX_NO_PROGRESS_E2E_OK",
+        createdPath: "reports/no-progress.txt",
+        requiredEventTypes: [
+          "run.claimed",
+          "sandbox.created",
+          "credential_boundary.verified",
+          "action.proposed",
+          "policy.evaluated",
+          "approval.requested",
+          "approval.decided",
+          "execution.started",
+          "agent.no_progress",
+          "execution.completed",
+          "provider.stdout",
+          "provider.stderr",
+          "agent.response",
+          "workspace.file_index_collected",
+          "workspace.patch_collected",
+          "run.completed"
+        ],
+        secretCanaries: [
+          config.codexApiKey,
+          config.daytonaApiKey,
+          config.r2.secretAccessKey,
+          config.r2.accessKeyId
+        ]
+      });
+      expect(events.find((event) => event.type === "agent.no_progress")?.payload).toMatchObject({
+        provider: "codex",
+        signal: "repeated_command"
+      });
+
+      const closeResult = await sdk.closeRun(stream.run.id);
+      expect(closeResult).toMatchObject({
+        closed: true,
+        conversationId: stream.run.id,
+        reclaimed: true
+      });
+    } finally {
+      controller.abort();
+      await worker;
+    }
+  }, 600_000);
+
   it("continues a real Codex conversation in the same sandbox and reclaims it", async () => {
     const sdk = agentrouter({ baseUrl, apiKey: config.apiKey });
     const runtimeModel = process.env.AGENTROUTER_MODEL;

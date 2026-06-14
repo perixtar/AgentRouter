@@ -460,6 +460,70 @@ describe("AgentRouter TypeScript SDK", () => {
     });
   });
 
+  it("surfaces no-progress events as typed stream parts", async () => {
+    const sdk = agentrouter({
+      baseUrl,
+      apiKey: config.apiKey
+    });
+
+    const stream = await streamAgent({
+      client: sdk,
+      task: "Watch for repeated commands",
+      runtime: codex({ mode: "default", model: "gpt-4o" }),
+      pollIntervalMs: 1,
+      maxWaitMs: 10_000
+    });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "codex",
+          eventType: "agent.no_progress",
+          providerEventType: "item.completed",
+          visibility: "public",
+          payload: {
+            provider: "codex",
+            signal: "repeated_command",
+            reason: "Repeated command failed with similar output",
+            command: "pnpm test",
+            occurrences: 3
+          }
+        });
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "run.completed",
+          visibility: "public",
+          payload: { message: "done" }
+        });
+        await repo.updateRunStatus(stream.run.id, "starting");
+        await repo.updateRunStatus(stream.run.id, "running");
+        await repo.updateRunStatus(stream.run.id, "completed");
+      });
+    } finally {
+      client.release();
+    }
+
+    const streamParts = [];
+    for await (const part of stream.fullStream) {
+      streamParts.push(part);
+    }
+    expect(streamParts).toEqual([
+      expect.objectContaining({
+        type: "no_progress",
+        signal: "repeated_command",
+        text: "Repeated command failed with similar output"
+      }),
+      expect.objectContaining({
+        type: "done",
+        status: "completed"
+      })
+    ]);
+  });
+
   it("surfaces approval and execution events as typed stream parts", async () => {
     const sdk = agentrouter({
       baseUrl,

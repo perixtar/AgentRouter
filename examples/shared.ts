@@ -75,6 +75,13 @@ function runEventPreview(event: RunEvent): string {
     return `runtime ${status}`;
   }
 
+  if (event.type === "agent.no_progress") {
+    const signal = typeof event.payload.signal === "string" ? event.payload.signal : "no_progress";
+    const reason =
+      typeof event.payload.reason === "string" ? event.payload.reason : "suspected stuck loop";
+    return `${signal}: ${reason}`;
+  }
+
   const message =
     typeof event.payload.message === "string"
       ? event.payload.message

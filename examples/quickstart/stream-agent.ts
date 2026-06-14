@@ -38,6 +38,8 @@ try {
       console.log(`execution: ${part.status}`);
     } else if (part.type === "progress") {
       console.log(`process: ${part.text}`);
+    } else if (part.type === "no_progress") {
+      console.log(`no progress (${part.signal}): ${part.text}`);
     } else if (part.type === "message") {
       console.log(`agent: ${part.text}`);
     } else if (part.type === "text") {

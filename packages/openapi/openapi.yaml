@@ -467,6 +467,14 @@ components:
               type: string
     RunEvent:
       type: object
+      description: >
+        Persisted run event. Known public event types include action.proposed,
+        policy.evaluated, approval.requested, approval.decided,
+        execution.started, execution.completed, execution.failed,
+        agent.started, agent.progress, agent.no_progress, agent.message,
+        agent.response, agent.error, provider.stdout,
+        workspace.file_index_collected, workspace.patch_collected,
+        run.completed, run.failed, and run.cancelled.
       required: [runId, sequence, type, source, visibility, payload, isTruncated, createdAt]
       properties:
         runId:
@@ -475,6 +483,10 @@ components:
           type: integer
         type:
           type: string
+          description: >
+            Event type. `agent.no_progress` means the runtime detected a
+            suspected stuck loop, such as repeated failed commands, repeated
+            file edits, or long provider output without state transitions.
         providerEventType:
           type: string
         source:

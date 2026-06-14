@@ -98,6 +98,7 @@ Event purposes:
 | `approval.decided` / `part.type === "approval_decision"` | The immutable approve/deny decision was recorded for the same action digest. |
 | `execution.started` / `part.type === "execution"` | The approved action started in the sandbox. |
 | `execution.completed` or `execution.failed` / `part.type === "execution"` | The sandbox execution finished; provider failure is represented here, not by rewriting approval history. |
+| `agent.no_progress` / `part.type === "no_progress"` | The runtime detected a suspected stuck loop, such as repeated failed commands, repeated edits, or long provider output without state transitions. |
 
 ## Runtime Mode Recipe
 

@@ -274,7 +274,8 @@ pnpm example:quickstart:run
 
 - `stream.events` gives raw persisted run events for audit and replay.
 - `stream.fullStream` gives app-friendly parts for progress, approvals,
-  execution, messages, final text, errors, and terminal state.
+  execution, no-progress warnings, messages, final text, errors, and terminal
+  state.
 
 The control-plane event chain exists so products can show more than logs:
 
@@ -286,6 +287,7 @@ The control-plane event chain exists so products can show more than logs:
 | `approval.decided` | `approval_decision` | Records the immutable approve/deny decision. |
 | `execution.started` | `execution` | Shows that the approved action started in the sandbox. |
 | `execution.completed` / `execution.failed` | `execution` | Shows whether sandbox execution finished or failed. |
+| `agent.no_progress` | `no_progress` | Surfaces suspected stuck loops: repeated failed commands, repeated edits, or long output without state transitions. |
 
 Manual approval:
 

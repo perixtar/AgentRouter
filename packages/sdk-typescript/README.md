@@ -100,8 +100,9 @@ const final = await stream.finalResult;
 console.log(final.status);
 ```
 
-`fullStream` emits safe progress summaries, messages, final text, errors, and
-terminal status. It does not expose hidden model chain-of-thought.
+`fullStream` emits safe progress summaries, no-progress warnings, messages,
+final text, errors, and terminal status. It does not expose hidden model
+chain-of-thought.
 
 If you only want final text chunks:
 
@@ -132,6 +133,7 @@ sequence number, original payload, artifact references, or audit trail.
 | `execution.completed` | `execution` | The action completed successfully. |
 | `execution.failed` | `execution` | Runtime execution failed after policy/approval; this does not rewrite the approval decision. |
 | `agent.progress` | `progress` | Public progress summary from the provider stream. Hidden reasoning is not exposed. |
+| `agent.no_progress` | `no_progress` | The runtime saw a suspected loop, such as repeated failed commands, repeated edits, or long output without state transitions. Use this to show a warning, ask for approval, cancel, or retry from the current state. |
 | `agent.message` | `message` | Assistant-visible message content before the final normalized response. |
 | `agent.response` | `text` | Final normalized agent response text. |
 | `run.completed`, `run.failed`, `run.cancelled` | `done` or `error` | Terminal run state. |

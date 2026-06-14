@@ -151,6 +151,7 @@ export type AgentStreamPart =
       status: ExecutionStreamStatus;
       event: RunEvent;
     }
+  | { type: "no_progress"; text: string; signal: string; event: RunEvent }
   | { type: "message"; text: string; event: RunEvent }
   | { type: "text"; text: string; event: RunEvent }
   | { type: "error"; text: string; event: RunEvent }
@@ -873,6 +874,18 @@ function streamPartFromRunEvent(event: RunEvent): AgentStreamPart | undefined {
   if (event.type === "agent.message") {
     const text = stringPayload(event, "text");
     return text ? { type: "message", text, event } : undefined;
+  }
+
+  if (event.type === "agent.no_progress") {
+    return {
+      type: "no_progress",
+      signal: stringPayload(event, "signal") ?? "no_progress",
+      text:
+        stringPayload(event, "reason") ??
+        stringPayload(event, "message") ??
+        "No-progress signal detected",
+      event
+    };
   }
 
   if (event.type === "agent.error" || event.type === "run.failed") {
