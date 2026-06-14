@@ -9,6 +9,7 @@ import {
   RunRepository,
   applyPhase1Migrations,
   dropSchema,
+  type EventRecord,
   withSearchPath
 } from "@agentrouter/db";
 import { CREDENTIAL_BOUNDARY_PROBE_MARKER } from "@agentrouter/credential-boundary";
@@ -100,6 +101,10 @@ describe("worker run-one orchestration", () => {
           "run.claimed",
           "sandbox.created",
           "credential_boundary.verified",
+          "action.proposed",
+          "policy.evaluated",
+          "execution.started",
+          "execution.completed",
           "provider.stdout",
           "provider.stderr",
           "agent.message",
@@ -299,10 +304,14 @@ describe("worker run-one orchestration", () => {
           "run.claimed",
           "sandbox.created",
           "credential_boundary.verified",
+          "action.proposed",
+          "policy.evaluated",
+          "execution.started",
           "agent.started",
           "agent.progress",
           "agent.message",
           "agent.completed",
+          "execution.completed",
           "provider.stdout",
           "provider.stderr",
           "agent.response",
@@ -323,6 +332,170 @@ describe("worker run-one orchestration", () => {
     } finally {
       client.release();
       await store.deleteRunPrefix(streamingRunId);
+    }
+  }, 60_000);
+
+  it("persists a Codex no-progress event for repeated failed commands", async () => {
+    const loopRunId = `run_${randomUUID()}`;
+    const loopSandbox = new StreamingRecordingSandboxDriver({
+      stdoutChunks: [
+        `${JSON.stringify({ type: "thread.started", thread_id: "thread_loop" })}\n`,
+        ...Array.from(
+          { length: 3 },
+          () =>
+            `${JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                command: "pnpm test",
+                exit_code: 1,
+                stdout: "1 failing test",
+                stderr: "Expected 1 to be 2"
+              }
+            })}\n`
+        ),
+        `${JSON.stringify({ type: "result", result: "done" })}\n`
+      ]
+    });
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: loopRunId,
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          runtimeModel: "gpt-4o",
+          input: {
+            task: "Run tests and fix failures",
+            runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
+          },
+          promptSummary: "Run tests and fix failures"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    await expect(
+      runOneWorkerIteration({
+        pool,
+        schema,
+        workerId: `worker_${randomUUID()}`,
+        sandbox: loopSandbox,
+        artifactStore: store,
+        testResourcePrefix: config.testResourcePrefix,
+        codexApiKey: config.codexApiKey,
+        baseEnv: process.env
+      })
+    ).resolves.toEqual({ processed: true, runId: loopRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const events = await new RunRepository(client).listEventsInternal({ runId: loopRunId });
+        const noProgress = eventOf(events, "agent.no_progress");
+        expect(noProgress.source).toBe("codex");
+        expect(noProgress.providerEventType).toBe("item.completed");
+        expect(noProgress.payload).toMatchObject({
+          provider: "codex",
+          signal: "repeated_command",
+          reason: "Repeated command failed with similar output",
+          command: "pnpm test",
+          occurrences: 3,
+          exitCode: 1
+        });
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(loopRunId);
+    }
+  }, 60_000);
+
+  it("persists a Claude Code no-progress event for repeated edit attempts", async () => {
+    const loopRunId = `run_${randomUUID()}`;
+    const editToolUse = {
+      type: "tool_use",
+      name: "Edit",
+      input: {
+        file_path: "/repo/src/service.ts",
+        old_string: "return false;",
+        new_string: "return true;"
+      }
+    };
+    const loopSandbox = new StreamingRecordingSandboxDriver({
+      stdoutChunks: [
+        `${JSON.stringify({ type: "system", subtype: "init", session_id: "sess_loop" })}\n`,
+        ...Array.from(
+          { length: 3 },
+          () =>
+            `${JSON.stringify({
+              type: "assistant",
+              message: {
+                content: [editToolUse]
+              }
+            })}\n`
+        ),
+        `${JSON.stringify({ type: "result", result: "done" })}\n`
+      ]
+    });
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: loopRunId,
+          orgId: "org_test",
+          runtimeKind: "claude_code",
+          runtimeMode: "acceptEdits",
+          runtimeModel: "claude-sonnet-4-6",
+          input: {
+            task: "Edit the service implementation",
+            runtime: {
+              kind: "claude_code",
+              permissionMode: "acceptEdits",
+              model: "claude-sonnet-4-6"
+            }
+          },
+          promptSummary: "Edit the service implementation"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    await expect(
+      runOneWorkerIteration({
+        pool,
+        schema,
+        workerId: `worker_${randomUUID()}`,
+        sandbox: loopSandbox,
+        artifactStore: store,
+        testResourcePrefix: config.testResourcePrefix,
+        codexApiKey: config.codexApiKey,
+        anthropicApiKey: "sk-ant-worker-canary",
+        baseEnv: process.env
+      })
+    ).resolves.toEqual({ processed: true, runId: loopRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const events = await new RunRepository(client).listEventsInternal({ runId: loopRunId });
+        const noProgress = eventOf(events, "agent.no_progress");
+        expect(noProgress.source).toBe("claude_code");
+        expect(noProgress.providerEventType).toBe("assistant");
+        expect(noProgress.payload).toMatchObject({
+          provider: "claude_code",
+          signal: "repeated_edit",
+          reason: "Repeated file edit did not produce meaningful progress",
+          path: "/repo/src/service.ts",
+          occurrences: 3
+        });
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(loopRunId);
     }
   }, 60_000);
 
@@ -416,6 +589,326 @@ describe("worker run-one orchestration", () => {
     }
   }, 60_000);
 
+  it("binds a manual Codex approval to the same digest before execution", async () => {
+    const manualRunId = `run_${randomUUID()}`;
+    const manualSandbox = new RecordingSandboxDriver();
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        const repo = new RunRepository(setupClient);
+        await repo.createRun({
+          id: manualRunId,
+          orgId: "org_test",
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          runtimeModel: "gpt-4o",
+          input: {
+            task: "Create reports/manual-codex.txt",
+            approvalMode: "manual",
+            runtime: { kind: "codex", mode: "default", model: "gpt-4o" }
+          },
+          promptSummary: "Create reports/manual-codex.txt"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const worker = runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: manualSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env
+    });
+
+    const requested = await waitForEvent(pool, schema, manualRunId, "approval.requested");
+    await appendApprovalDecision(pool, schema, manualRunId, requested, "approved");
+
+    await expect(worker).resolves.toEqual({ processed: true, runId: manualRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const events = await repo.listEventsInternal({ runId: manualRunId });
+
+        assertCausalActionChain(events, {
+          policyDecision: "requires_approval",
+          approvalDecision: "approved",
+          executionTerminalEvent: "execution.completed"
+        });
+        expect(events.map((event) => event.eventType)).toEqual(
+          expect.arrayContaining([
+            "action.proposed",
+            "policy.evaluated",
+            "approval.requested",
+            "approval.decided",
+            "execution.started",
+            "execution.completed",
+            "provider.stdout",
+            "run.completed"
+          ])
+        );
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(manualRunId);
+    }
+  }, 60_000);
+
+  it("binds a manual Claude Code approval to the same digest before execution", async () => {
+    const manualRunId = `run_${randomUUID()}`;
+    const manualSandbox = new RecordingSandboxDriver();
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        const repo = new RunRepository(setupClient);
+        await repo.createRun({
+          id: manualRunId,
+          orgId: "org_test",
+          runtimeKind: "claude_code",
+          runtimeMode: "acceptEdits",
+          runtimeModel: "claude-sonnet-4-6",
+          input: {
+            task: "Create reports/manual-claude.txt",
+            approvalMode: "manual",
+            runtime: {
+              kind: "claude_code",
+              permissionMode: "acceptEdits",
+              model: "claude-sonnet-4-6"
+            }
+          },
+          promptSummary: "Create reports/manual-claude.txt"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const worker = runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: manualSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      anthropicApiKey: "sk-ant-worker-canary",
+      baseEnv: process.env
+    });
+
+    const requested = await waitForEvent(pool, schema, manualRunId, "approval.requested");
+    await appendApprovalDecision(pool, schema, manualRunId, requested, "approved");
+
+    await expect(worker).resolves.toEqual({ processed: true, runId: manualRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const events = await new RunRepository(client).listEventsInternal({ runId: manualRunId });
+
+        assertCausalActionChain(events, {
+          policyDecision: "requires_approval",
+          approvalDecision: "approved",
+          executionTerminalEvent: "execution.completed"
+        });
+        expect(events.find((event) => event.eventType === "provider.stdout")?.source).toBe(
+          "claude_code"
+        );
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(manualRunId);
+    }
+  }, 60_000);
+
+  it("does not execute when policy blocks the proposed action", async () => {
+    const blockedRunId = `run_${randomUUID()}`;
+    const blockedSandbox = new RecordingSandboxDriver();
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: blockedRunId,
+          orgId: "org_test",
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          input: {
+            task: "Create reports/blocked.txt",
+            approvalMode: "block",
+            runtime: { kind: "codex", mode: "default" }
+          },
+          promptSummary: "Create reports/blocked.txt"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    await expect(
+      runOneWorkerIteration({
+        pool,
+        schema,
+        workerId: `worker_${randomUUID()}`,
+        sandbox: blockedSandbox,
+        artifactStore: store,
+        testResourcePrefix: config.testResourcePrefix,
+        codexApiKey: config.codexApiKey,
+        baseEnv: process.env
+      })
+    ).resolves.toEqual({ processed: true, runId: blockedRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const run = await repo.getRun(blockedRunId, "org_test");
+        const events = await repo.listEvents({ runId: blockedRunId, orgId: "org_test" });
+
+        expect(run?.status).toBe("failed");
+        expect(events.map((event) => event.eventType)).toEqual(
+          expect.arrayContaining(["action.proposed", "policy.evaluated", "run.failed"])
+        );
+        expect(events.find((event) => event.eventType === "policy.evaluated")?.payload).toMatchObject({
+          decision: "blocked",
+          terminalState: "blocked"
+        });
+        expect(events.map((event) => event.eventType)).not.toContain("execution.started");
+        expect(events.map((event) => event.eventType)).not.toContain("provider.stdout");
+        expect(blockedSandbox.commands.some((command) => command.includes("'codex'"))).toBe(false);
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(blockedRunId);
+    }
+  }, 60_000);
+
+  it("does not execute when a human denies approval", async () => {
+    const deniedRunId = `run_${randomUUID()}`;
+    const deniedSandbox = new RecordingSandboxDriver();
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: deniedRunId,
+          orgId: "org_test",
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          input: {
+            task: "Create reports/denied.txt",
+            approvalMode: "manual",
+            runtime: { kind: "codex", mode: "default" }
+          },
+          promptSummary: "Create reports/denied.txt"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const worker = runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: deniedSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env
+    });
+
+    const requested = await waitForEvent(pool, schema, deniedRunId, "approval.requested");
+    await appendApprovalDecision(pool, schema, deniedRunId, requested, "denied");
+    await expect(worker).resolves.toEqual({ processed: true, runId: deniedRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const run = await repo.getRun(deniedRunId, "org_test");
+        const events = await repo.listEvents({ runId: deniedRunId, orgId: "org_test" });
+
+        expect(run?.status).toBe("failed");
+        assertCausalActionChain(events, {
+          policyDecision: "requires_approval",
+          approvalDecision: "denied"
+        });
+        expect(events.map((event) => event.eventType)).not.toContain("execution.started");
+        expect(events.map((event) => event.eventType)).not.toContain("provider.stdout");
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(deniedRunId);
+    }
+  }, 60_000);
+
+  it("does not execute when approval is granted for a different digest", async () => {
+    const mismatchRunId = `run_${randomUUID()}`;
+    const mismatchSandbox = new RecordingSandboxDriver();
+
+    const setupClient = await pool.connect();
+    try {
+      await withSearchPath(setupClient, schema, async () => {
+        await new RunRepository(setupClient).createRun({
+          id: mismatchRunId,
+          orgId: "org_test",
+          runtimeKind: "codex",
+          runtimeMode: "default",
+          input: {
+            task: "Create reports/mismatch.txt",
+            approvalMode: "manual",
+            runtime: { kind: "codex", mode: "default" }
+          },
+          promptSummary: "Create reports/mismatch.txt"
+        });
+      });
+    } finally {
+      setupClient.release();
+    }
+
+    const worker = runOneWorkerIteration({
+      pool,
+      schema,
+      workerId: `worker_${randomUUID()}`,
+      sandbox: mismatchSandbox,
+      artifactStore: store,
+      testResourcePrefix: config.testResourcePrefix,
+      codexApiKey: config.codexApiKey,
+      baseEnv: process.env
+    });
+
+    const requested = await waitForEvent(pool, schema, mismatchRunId, "approval.requested");
+    await appendApprovalDecision(pool, schema, mismatchRunId, requested, "approved", {
+      actionDigest: "sha256:different_digest"
+    });
+    await expect(worker).resolves.toEqual({ processed: true, runId: mismatchRunId });
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        const run = await repo.getRun(mismatchRunId, "org_test");
+        const events = await repo.listEvents({ runId: mismatchRunId, orgId: "org_test" });
+
+        expect(run?.status).toBe("failed");
+        expect(run?.failureCode).toBe("approval_digest_mismatch");
+        expect(events.map((event) => event.eventType)).not.toContain("execution.started");
+        expect(events.map((event) => event.eventType)).not.toContain("provider.stdout");
+      });
+    } finally {
+      client.release();
+      await store.deleteRunPrefix(mismatchRunId);
+    }
+  }, 60_000);
+
   it("records structured Claude Code provider errors on failed runs", async () => {
     const claudeFailureRunId = `run_${randomUUID()}`;
     const claudeFailureSandbox = new RecordingSandboxDriver({
@@ -435,6 +928,7 @@ describe("worker run-one orchestration", () => {
           runtimeMode: "default",
           input: {
             task: "Reply with a short status",
+            approvalMode: "manual",
             runtime: {
               kind: "claude_code",
               permissionMode: "default"
@@ -447,7 +941,7 @@ describe("worker run-one orchestration", () => {
       setupClient.release();
     }
 
-    const result = await runOneWorkerIteration({
+    const worker = runOneWorkerIteration({
       pool,
       schema,
       workerId: `worker_${randomUUID()}`,
@@ -458,6 +952,9 @@ describe("worker run-one orchestration", () => {
       baseEnv: process.env
     });
 
+    const requested = await waitForEvent(pool, schema, claudeFailureRunId, "approval.requested");
+    await appendApprovalDecision(pool, schema, claudeFailureRunId, requested, "approved");
+    const result = await worker;
     expect(result).toEqual({ processed: true, runId: claudeFailureRunId });
 
     const client = await pool.connect();
@@ -471,6 +968,11 @@ describe("worker run-one orchestration", () => {
         expect(run?.failureReason).toBe(
           "Claude Code process exited non-zero: Credit balance is too low"
         );
+        assertCausalActionChain(events, {
+          policyDecision: "requires_approval",
+          approvalDecision: "approved",
+          executionTerminalEvent: "execution.failed"
+        });
         expect(events.at(-1)?.eventType).toBe("run.failed");
         expect(events.at(-1)?.payload.reason).toBe(run?.failureReason);
 
@@ -694,6 +1196,126 @@ describe("worker run-one orchestration", () => {
     }
   }, 30_000);
 });
+
+async function waitForEvent(
+  pool: Pool,
+  schema: string,
+  runId: string,
+  eventType: string
+): Promise<EventRecord> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const client = await pool.connect();
+    try {
+      const event = await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        return (await repo.listEventsInternal({ runId })).find(
+          (item) => item.eventType === eventType
+        );
+      });
+      if (event) return event;
+    } finally {
+      client.release();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`Timed out waiting for ${eventType} on ${runId}`);
+}
+
+async function appendApprovalDecision(
+  pool: Pool,
+  schema: string,
+  runId: string,
+  requested: EventRecord,
+  decision: "approved" | "denied",
+  overrides: { actionDigest?: string } = {}
+): Promise<EventRecord> {
+  const requestedPayload = requested.payload;
+  const actionId = stringPayload(requestedPayload, "actionId");
+  const actionDigest = overrides.actionDigest ?? stringPayload(requestedPayload, "actionDigest");
+  const argsDigest = stringPayload(requestedPayload, "argsDigest");
+  const client = await pool.connect();
+  try {
+    return await withSearchPath(client, schema, async () =>
+      new RunRepository(client).appendEvent({
+        runId,
+        source: "api",
+        eventType: "approval.decided",
+        visibility: "public",
+        payload: {
+          eventId: `evt_${randomUUID()}`,
+          priorEventId: stringPayload(requestedPayload, "eventId"),
+          actionId,
+          actionDigest,
+          argsDigest,
+          actor: "human",
+          decisionId: `decision_${randomUUID()}`,
+          decision,
+          terminalState: decision === "denied" ? "denied" : undefined
+        }
+      })
+    );
+  } finally {
+    client.release();
+  }
+}
+
+function assertCausalActionChain(
+  events: EventRecord[],
+  expectation: {
+    policyDecision: "allowed" | "requires_approval" | "blocked";
+    approvalDecision?: "approved" | "denied";
+    executionTerminalEvent?: "execution.completed" | "execution.failed";
+  }
+): void {
+  const proposed = eventOf(events, "action.proposed");
+  const policy = eventOf(events, "policy.evaluated");
+  const actionId = stringPayload(proposed.payload, "actionId");
+  const actionDigest = stringPayload(proposed.payload, "actionDigest");
+
+  expect(policy.payload).toMatchObject({
+    priorEventId: proposed.payload.eventId,
+    actionId,
+    actionDigest,
+    decision: expectation.policyDecision
+  });
+
+  const approval = events.find((event) => event.eventType === "approval.decided");
+  if (expectation.approvalDecision) {
+    expect(approval?.payload).toMatchObject({
+      actionId,
+      actionDigest:
+        expectation.approvalDecision === "approved" ? actionDigest : approval?.payload.actionDigest,
+      decision: expectation.approvalDecision
+    });
+  } else {
+    expect(approval).toBeUndefined();
+  }
+
+  const started = events.find((event) => event.eventType === "execution.started");
+  const terminalExecution = expectation.executionTerminalEvent
+    ? eventOf(events, expectation.executionTerminalEvent)
+    : undefined;
+
+  if (terminalExecution) {
+    expect(started?.payload).toMatchObject({ actionId, actionDigest });
+    expect(terminalExecution.payload).toMatchObject({ actionId, actionDigest });
+  } else {
+    expect(started).toBeUndefined();
+  }
+}
+
+function eventOf(events: EventRecord[], eventType: string): EventRecord {
+  const event = events.find((item) => item.eventType === eventType);
+  if (!event) throw new Error(`Missing event ${eventType}`);
+  return event;
+}
+
+function stringPayload(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string") throw new Error(`Expected string payload ${key}`);
+  return value;
+}
 
 interface RecordingSandboxDriverOptions {
   claudeExitCode?: number;

@@ -100,8 +100,9 @@ const final = await stream.finalResult;
 console.log(final.status);
 ```
 
-`fullStream` emits safe progress summaries, messages, final text, errors, and
-terminal status. It does not expose hidden model chain-of-thought.
+`fullStream` emits safe progress summaries, no-progress warnings, messages,
+final text, errors, and terminal status. It does not expose hidden model
+chain-of-thought.
 
 If you only want final text chunks:
 
@@ -111,6 +112,76 @@ for await (const text of stream.textStream) {
 }
 ```
 
+## Control-plane events
+
+AgentRouter streams two related surfaces:
+
+- `stream.events` yields raw persisted `RunEvent` records exactly as stored by
+  the runtime control plane.
+- `stream.fullStream` yields ergonomic `AgentStreamPart` objects for app code.
+
+Use `fullStream` for most products. Drop to raw events when you need the
+sequence number, original payload, artifact references, or audit trail.
+
+| Raw event | `fullStream` part | Purpose |
+| --- | --- | --- |
+| `action.proposed` | `action` | AgentRouter has defined the exact runtime action it may execute, including `actionId`, `actionDigest`, target, and schema version. |
+| `policy.evaluated` | `progress` | The configured policy decided whether that action is `allowed`, `requires_approval`, or `blocked`. |
+| `approval.requested` | `approval_request` | The run is paused until your app records an approval decision for the same `actionDigest`. |
+| `approval.decided` | `approval_decision` | A human or approval system approved or denied the action. Repeated identical decisions are deterministic no-ops. |
+| `execution.started` | `execution` | The approved action started inside the sandbox. |
+| `execution.completed` | `execution` | The action completed successfully. |
+| `execution.failed` | `execution` | Runtime execution failed after policy/approval; this does not rewrite the approval decision. |
+| `agent.progress` | `progress` | Public progress summary from the provider stream. Hidden reasoning is not exposed. |
+| `agent.no_progress` | `no_progress` | The runtime saw a suspected loop, such as repeated failed commands, repeated edits, or long output without state transitions. Use this to show a warning, ask for approval, cancel, or retry from the current state. |
+| `agent.message` | `message` | Assistant-visible message content before the final normalized response. |
+| `agent.response` | `text` | Final normalized agent response text. |
+| `run.completed`, `run.failed`, `run.cancelled` | `done` or `error` | Terminal run state. |
+
+No-progress handling example:
+
+```ts
+for await (const part of stream.fullStream) {
+  if (part.type === "no_progress") {
+    console.warn(`Agent may be stuck: ${part.signal} - ${part.text}`);
+    // Your app can cancel the run, ask for approval, or let the user continue.
+  }
+}
+```
+
+The raw `agent.no_progress` event stays in `stream.events`, session manifests,
+and artifact-backed event archives, so dashboards and audit views can replay
+when the loop signal happened.
+
+Manual approval example:
+
+```ts
+const stream = await streamAgent({
+  client,
+  task: "Run the repository tests and summarize failures.",
+  runtime: codex({ mode: "full_access" }),
+  approvalMode: "manual"
+});
+
+for await (const part of stream.fullStream) {
+  if (part.type === "approval_request") {
+    await client.approveRunAction({
+      runId: stream.run.id,
+      actionId: part.actionId,
+      actionDigest: part.actionDigest,
+      reason: "Approved by CI policy"
+    });
+  }
+
+  if (part.type === "execution") {
+    console.log(part.status);
+  }
+}
+```
+
+`actionDigest` is the important safety field. An approval for digest A cannot
+start execution for digest B.
+
 ## Continue a conversation
 
 AgentRouter can keep a sandbox and provider thread alive after a run finishes.
@@ -119,6 +190,16 @@ The first run id becomes the conversation handle.
 Run ids are the SDK's public conversation handle. Use `streamAgent` with
 `continueRun` for streamed follow-up turns, or `runAgent` with `continueRun`
 when you only need the final result. There is no separate public session API.
+
+`conversationId` and `runId` are different on follow-up turns:
+
+```txt
+conversationId  stable id for the whole conversation; pass this as continueRun
+runId           id for one specific turn; stream/fetch this turn's events
+```
+
+For turn 1 they are the same id. For turn 2+, `conversationId` stays fixed as
+the first run id, while `runId` is the newly-created run for that turn.
 
 ```ts
 import { agentrouter, codex, runAgent, streamAgent } from "@agentrouterhq/sdk";
@@ -211,6 +292,7 @@ Available client methods:
 | `listRunEvents`, `streamRun` | Read observable run events |
 | `getRunSession` | Get the final run response, event cursor, and artifact manifest |
 | `listRunArtifacts`, `downloadArtifact` | Inspect and download artifacts |
+| `approveRunAction`, `denyRunAction` | Record an immutable approval decision for an `approval.requested` action digest |
 | `continueRun`, `getRunTurns`, `closeRun` | Continue, inspect, or close a run-id conversation |
 
 ## Runtime options

@@ -1,11 +1,13 @@
 # AgentRouter
 
-Self-hosted runtime for running Codex and Claude Code agents in secure sandboxes.
+Self-hosted control plane for running Codex and Claude Code inside product
+workflows.
 
-AgentRouter gives you the backend pieces for production-style coding agents:
-an HTTP API, worker loop, sandbox lifecycle, streaming events, persisted run
-state, artifacts, and a TypeScript SDK. Bring your own model keys and run
-agents from your app, CLI, or CI without rebuilding the orchestration layer.
+AgentRouter gives you the runtime around agent runs: sandboxing, long-running
+jobs, streaming events, persisted run state, artifacts, patches, retries,
+provider-key isolation, and a TypeScript SDK. Bring your own model keys and run
+Codex or Claude Code from your app, CLI, dashboard, CI job, or internal tool
+without rebuilding the execution layer.
 
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 ![TypeScript](https://img.shields.io/badge/language-TypeScript-3178c6)
@@ -18,13 +20,17 @@ agents from your app, CLI, or CI without rebuilding the orchestration layer.
 
 ## Why AgentRouter
 
-Codex and Claude Code are powerful general-purpose agents, but they are built
-primarily as interactive CLIs. Product teams need something different: a way to
-turn them into custom agents that run from an app, CLI, dashboard, CI job, or
-internal tool.
+Codex and Claude Code are strong general-purpose agents. They can explore a
+repo, edit files, run commands, manage context, recover from intermediate
+states, and keep working across multi-step tasks.
 
-AgentRouter gives developers the runtime layer for that. You define the product
-workflow, such as:
+The problem starts when that agent becomes part of a product workflow. Product
+teams need a control plane around the run: where it executes, what state is
+stored, how progress streams back to users, which artifacts are produced, when
+the run can be cancelled or resumed, and how provider keys and sandbox
+permissions stay isolated.
+
+AgentRouter is that runtime layer. You define the product workflow, such as:
 
 - PR review agents that inspect a diff, run tests, and produce comments.
 - Bug reproduction agents that investigate a failing case in a sandbox.
@@ -33,14 +39,48 @@ workflow, such as:
 - Internal tools that expose Codex or Claude Code as a controlled API.
 - CI workflows that run an agent and collect logs/artifacts.
 
-AgentRouter handles the execution surface around those agents: isolated Daytona
-sandboxes, long-running jobs, streaming progress, conversation state,
+AgentRouter handles the execution surface around those workflows: isolated
+Daytona sandboxes, long-running jobs, streaming progress, conversation state,
 permissions, provider keys, logs, generated files, patches, artifacts, and
 resume behavior. The same API and TypeScript SDK can run Codex or Claude Code
 behind one interface.
 
 AgentRouter lets you focus on the agent your users need, not the runtime
 infrastructure required to operate it.
+
+## What AgentRouter Handles Today
+
+- HTTP API and TypeScript SDK for creating, streaming, continuing, and
+  cancelling agent runs.
+- Worker loop that claims queued runs and executes them in isolated Daytona
+  sandboxes.
+- Runtime adapters for Codex CLI and Claude Code.
+- Streaming observable progress events without exposing hidden model
+  chain-of-thought.
+- Durable run, attempt, session, turn, and event state in Postgres.
+- R2-compatible artifact storage for logs, patches, generated files, file
+  indexes, and session manifests.
+- Credential boundary that keeps provider keys server-side and scoped to the
+  provider process.
+- Run-id based continuation for multi-turn workflows.
+
+## Roadmap From Launch Feedback
+
+The current runtime already records events and artifacts, but launch feedback
+made the next product direction clearer: production agent runs need to be safe,
+inspectable, resumable, and controllable.
+
+- [Queryable run record](https://github.com/perixtar/AgentRouter/issues/3):
+  make the run record the source of truth for current state, available actions,
+  artifacts, decisions, and terminal outcomes.
+- [First-class approval boundaries](https://github.com/perixtar/AgentRouter/issues/4):
+  distinguish what the agent proposed, what policy allowed or blocked, what a
+  human approved or denied, and what the runtime actually executed.
+- [Stuck/no-progress detection](https://github.com/perixtar/AgentRouter/issues/2):
+  surface repeated commands, repeated edits with no meaningful diff, and long
+  output periods without state transitions.
+
+These are active product-direction issues, not fully shipped features yet.
 
 ## Architecture
 
@@ -228,6 +268,79 @@ Run the SDK example:
 pnpm example:quickstart:run
 ```
 
+## SDK Event Model
+
+`streamAgent` exposes two streaming surfaces:
+
+- `stream.events` gives raw persisted run events for audit and replay.
+- `stream.fullStream` gives app-friendly parts for progress, approvals,
+  execution, no-progress warnings, messages, final text, errors, and terminal
+  state.
+
+The control-plane event chain exists so products can show more than logs:
+
+| Raw event | SDK part | Purpose |
+| --- | --- | --- |
+| `action.proposed` | `action` | Defines the exact runtime action AgentRouter may execute. |
+| `policy.evaluated` | `progress` | Records whether policy allowed, blocked, or required approval for that action. |
+| `approval.requested` | `approval_request` | Pauses a manual run until the app approves or denies the action digest. |
+| `approval.decided` | `approval_decision` | Records the immutable approve/deny decision. |
+| `execution.started` | `execution` | Shows that the approved action started in the sandbox. |
+| `execution.completed` / `execution.failed` | `execution` | Shows whether sandbox execution finished or failed. |
+| `agent.no_progress` | `no_progress` | Surfaces suspected stuck loops: repeated failed commands, repeated edits, or long output without state transitions. |
+
+### Stuck-loop detection
+
+The production failure mode is simple: a coding agent can keep running the same
+failed command, churn the same edit, or produce a lot of output without moving
+the run forward. Logs alone make that hard for a product to act on.
+
+AgentRouter treats this as runtime state. When the worker sees suspicious
+patterns in the real Codex or Claude Code stream, it persists
+`agent.no_progress` in the run record and the TypeScript SDK exposes it as:
+
+```ts
+for await (const part of stream.fullStream) {
+  if (part.type === "no_progress") {
+    console.warn(part.signal, part.text);
+    // Show a warning, request approval, cancel, retry, or continue from state.
+  }
+}
+```
+
+Try the recipe:
+
+```sh
+pnpm example:recipe:no-progress
+```
+
+Manual approval:
+
+```ts
+const stream = await streamAgent({
+  client,
+  task: "Run tests and summarize failures.",
+  runtime: codex({ mode: "full_access" }),
+  approvalMode: "manual"
+});
+
+for await (const part of stream.fullStream) {
+  if (part.type === "approval_request") {
+    await client.approveRunAction({
+      runId: stream.run.id,
+      actionId: part.actionId,
+      actionDigest: part.actionDigest
+    });
+  }
+}
+```
+
+Run the approval example:
+
+```sh
+pnpm example:recipe:approval-events
+```
+
 ## Multi-Turn Runs
 
 A run id can become the conversation handle. Start a run, then continue it by
@@ -237,6 +350,13 @@ The public SDK uses run ids as the only conversation handle. Use
 `streamAgent({ continueRun, message })` for streamed follow-up turns, or
 `runAgent({ continueRun, message })` when you only need the final result.
 There is no separate public session API.
+
+Mental model:
+
+```txt
+conversationId  stable id for the whole conversation; this is the first run id
+runId           id for one specific turn; each follow-up turn gets a new run id
+```
 
 ```ts
 import { agentrouter, codex, streamAgent } from "@agentrouterhq/sdk";

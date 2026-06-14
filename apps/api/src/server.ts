@@ -73,11 +73,17 @@ const runtimeSchema = z
 const createRunSchema = z.strictObject({
   task: z.string().trim().min(1).max(120_000),
   runtime: runtimeSchema.default({ kind: "codex", mode: "default" }),
+  approvalMode: z.enum(["auto", "manual", "block"]).optional(),
   metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 const conversationMessageSchema = z.strictObject({
   message: z.string().trim().min(1).max(120_000)
+});
+
+const actionDecisionSchema = z.strictObject({
+  actionDigest: z.string().trim().min(8).max(256).regex(/^sha256:.+$/),
+  reason: z.string().trim().min(1).max(1000).optional()
 });
 
 const unsupportedConfigKeys = new Set([
@@ -381,6 +387,34 @@ export function buildApiServer(input: BuildApiServerInput): FastifyInstance {
     return runToApi(run);
   });
 
+  server.post("/v1/runs/:runId/actions/:actionId/approve", async (request) => {
+    const { runId, actionId } = actionParams(request);
+    const parsed = actionDecisionSchema.parse(request.body);
+    const event = await recordApprovalDecision(input, {
+      orgId: orgOf(request),
+      runId,
+      actionId,
+      actionDigest: parsed.actionDigest,
+      decision: "approved",
+      reason: parsed.reason
+    });
+    return eventToApi(event);
+  });
+
+  server.post("/v1/runs/:runId/actions/:actionId/deny", async (request) => {
+    const { runId, actionId } = actionParams(request);
+    const parsed = actionDecisionSchema.parse(request.body);
+    const event = await recordApprovalDecision(input, {
+      orgId: orgOf(request),
+      runId,
+      actionId,
+      actionDigest: parsed.actionDigest,
+      decision: "denied",
+      reason: parsed.reason
+    });
+    return eventToApi(event);
+  });
+
   // ── Run-id multi-turn (M1): the run id is the conversation handle. ──
 
   // Continue a conversation by run id. Resolves the run to its session (a
@@ -680,6 +714,121 @@ function assertNoUnsupportedConfiguration(body: unknown): void {
 
 function runParams(request: FastifyRequest): { runId: string } {
   return z.object({ runId: z.string().min(1) }).parse(request.params);
+}
+
+function actionParams(request: FastifyRequest): { runId: string; actionId: string } {
+  return z
+    .object({
+      runId: z.string().min(1),
+      actionId: z.string().min(1)
+    })
+    .parse(request.params);
+}
+
+async function recordApprovalDecision(
+  input: BuildApiServerInput,
+  decisionInput: {
+    orgId: string;
+    runId: string;
+    actionId: string;
+    actionDigest: string;
+    decision: "approved" | "denied";
+    reason?: string;
+  }
+): Promise<EventRecord> {
+  return withClient(input, async (client) => {
+    await client.query("begin");
+    try {
+      const lockedRun = await client.query(
+        "select id from runs where id = $1 and org_id = $2 for update",
+        [decisionInput.runId, decisionInput.orgId]
+      );
+      if (lockedRun.rowCount !== 1) {
+        throw new ApiError(404, "run_not_found", "Run not found");
+      }
+
+      const repo = new RunRepository(client);
+      const events = await repo.listEvents({
+        runId: decisionInput.runId,
+        orgId: decisionInput.orgId,
+        limit: 500
+      });
+      const requested = [...events]
+        .reverse()
+        .find(
+          (event) =>
+            event.eventType === "approval.requested" &&
+            event.payload.actionId === decisionInput.actionId
+        );
+      if (!requested) {
+        throw new ApiError(409, "approval_not_requested", "No approval is pending for this action");
+      }
+
+      const requestedDigest = stringField(requested.payload, "actionDigest");
+      if (requestedDigest !== decisionInput.actionDigest) {
+        throw new ApiError(
+          409,
+          "action_digest_mismatch",
+          "Approval decision does not match the requested action digest",
+          { expected: requestedDigest, received: decisionInput.actionDigest }
+        );
+      }
+
+      const existingDecision = events.find(
+        (event) =>
+          event.eventType === "approval.decided" &&
+          event.payload.actionId === decisionInput.actionId
+      );
+      if (existingDecision) {
+        if (
+          existingDecision.payload.actionDigest === decisionInput.actionDigest &&
+          existingDecision.payload.decision === decisionInput.decision
+        ) {
+          await client.query("commit");
+          return existingDecision;
+        }
+
+        throw new ApiError(409, "approval_already_decided", "Approval has already been decided");
+      }
+
+      const event = await repo.appendEvent({
+        runId: decisionInput.runId,
+        source: "api",
+        eventType: "approval.decided",
+        visibility: "public",
+        payload: {
+          eventId: `evt_${randomUUID()}`,
+          priorEventId: stringField(requested.payload, "eventId"),
+          actionId: decisionInput.actionId,
+          actionDigest: decisionInput.actionDigest,
+          argsDigest: stringField(requested.payload, "argsDigest"),
+          actor: "human",
+          requestId: optionalPayloadString(requested.payload.requestId),
+          decisionId: `decision_${randomUUID()}`,
+          decision: decisionInput.decision,
+          reason: decisionInput.reason,
+          terminalState: decisionInput.decision === "denied" ? "denied" : undefined
+        }
+      });
+      await client.query("commit");
+      return event;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    }
+  });
+}
+
+function stringField(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ApiError(409, "invalid_action_event", `Action event is missing ${key}`);
+  }
+  return value;
+}
+
+function optionalPayloadString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 async function getRunOrThrow(

@@ -1,6 +1,6 @@
 {
   "name": "@agentrouterhq/sdk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "TypeScript SDK for running Codex and Claude Code agents with AgentRouter",
   "license": "MIT",
   "type": "module",
@@ -40,5 +40,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "author": ""
 }

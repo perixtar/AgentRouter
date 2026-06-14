@@ -44,14 +44,61 @@ export function claudeCodeRuntime(
 }
 
 export function logRunEvent(event: RunEvent): void {
+  const preview = runEventPreview(event);
+  console.log(`event #${event.sequence} ${event.type}${preview ? `: ${preview}` : ""}`);
+}
+
+function runEventPreview(event: RunEvent): string {
+  if (event.type === "action.proposed") {
+    const name = actionName(event.payload);
+    const digest = typeof event.payload.actionDigest === "string" ? event.payload.actionDigest : "";
+    return `${name}${digest ? ` ${digest.slice(0, 24)}...` : ""}`;
+  }
+
+  if (event.type === "policy.evaluated") {
+    const decision = typeof event.payload.decision === "string" ? event.payload.decision : "unknown";
+    const policyId = typeof event.payload.policyId === "string" ? event.payload.policyId : "policy";
+    return `${policyId} ${decision}`;
+  }
+
+  if (event.type === "approval.requested") {
+    return `waiting for approval of ${actionName(event.payload)}`;
+  }
+
+  if (event.type === "approval.decided") {
+    const decision = typeof event.payload.decision === "string" ? event.payload.decision : "unknown";
+    return `approval ${decision}`;
+  }
+
+  if (event.type.startsWith("execution.")) {
+    const status = typeof event.payload.status === "string" ? event.payload.status : event.type.split(".")[1];
+    return `runtime ${status}`;
+  }
+
+  if (event.type === "agent.no_progress") {
+    const signal = typeof event.payload.signal === "string" ? event.payload.signal : "no_progress";
+    const reason =
+      typeof event.payload.reason === "string" ? event.payload.reason : "suspected stuck loop";
+    return `${signal}: ${reason}`;
+  }
+
   const message =
     typeof event.payload.message === "string"
       ? event.payload.message
       : typeof event.payload.text === "string"
         ? event.payload.text
         : "";
-  const preview = message.slice(0, 160).replaceAll("\n", " ");
-  console.log(`event #${event.sequence} ${event.type}${preview ? `: ${preview}` : ""}`);
+  return message.slice(0, 160).replaceAll("\n", " ");
+}
+
+function actionName(payload: Record<string, unknown>): string {
+  const action = payload.action;
+  if (action && typeof action === "object") {
+    const name = (action as { name?: unknown }).name;
+    if (typeof name === "string" && name.length > 0) return name;
+  }
+
+  return typeof payload.actionName === "string" ? payload.actionName : "runtime action";
 }
 
 export function handleExampleError(error: unknown): void {

@@ -12,6 +12,11 @@ describe("OpenAPI Phase 1 contract", () => {
       "/v1/runs/{runId}/stream",
       "/v1/runs/{runId}/events",
       "/v1/runs/{runId}/cancel",
+      "/v1/runs/{runId}/actions/{actionId}/approve",
+      "/v1/runs/{runId}/actions/{actionId}/deny",
+      "/v1/runs/{runId}/messages",
+      "/v1/runs/{runId}/turns",
+      "/v1/runs/{runId}/close",
       "/v1/runs/{runId}/artifacts",
       "/v1/runs/{runId}/artifacts/{artifactId}/download"
     ]) {

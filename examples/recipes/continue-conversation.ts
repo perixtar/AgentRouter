@@ -1,4 +1,4 @@
-import { streamAgent } from "@agentrouterhq/sdk";
+import { streamAgent, type AgentStreamPart } from "@agentrouterhq/sdk";
 import {
   codexRuntime,
   handleExampleError,
@@ -72,15 +72,7 @@ try {
   }
 }
 
-function printStreamPart(
-  turn: string,
-  part:
-    | { type: "progress"; text: string }
-    | { type: "message"; text: string }
-    | { type: "text"; text: string }
-    | { type: "error"; text: string }
-    | { type: "done"; status: string }
-): void {
+function printStreamPart(turn: string, part: AgentStreamPart): void {
   if (part.type === "done") {
     console.log(`${turn}: ${part.status}`);
     return;

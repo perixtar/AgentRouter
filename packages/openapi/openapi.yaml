@@ -155,6 +155,110 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Run"
+  /v1/runs/{runId}/actions/{actionId}/approve:
+    post:
+      operationId: approveRunAction
+      description: Approve a pending action using the canonical action digest from approval.requested.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunActionDecisionRequest"
+      responses:
+        "200":
+          description: Approval decision event, or the existing same decision for an idempotent retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunEvent"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/actions/{actionId}/deny:
+    post:
+      operationId: denyRunAction
+      description: Deny a pending action using the canonical action digest from approval.requested.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunActionDecisionRequest"
+      responses:
+        "200":
+          description: Approval decision event, or the existing same decision for an idempotent retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunEvent"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/messages:
+    post:
+      operationId: continueRun
+      description: >
+        Continue a run-id conversation. The path runId is the stable
+        conversation id, which is the first run id. The response runId is the
+        newly-created run for this follow-up turn.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationMessageRequest"
+      responses:
+        "202":
+          description: Follow-up turn enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContinueRunResult"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/turns:
+    get:
+      operationId: getRunTurns
+      description: List turns for a run-id conversation.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Conversation turns
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunTurnsResult"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/close:
+    post:
+      operationId: closeRun
+      description: Close a run-id conversation and arm sandbox reclaim.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Conversation closed or already not reclaimable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloseRunResult"
+        "404":
+          $ref: "#/components/responses/Error"
   /v1/runs/{runId}/artifacts:
     get:
       operationId: listRunArtifacts
@@ -205,6 +309,12 @@ components:
       required: true
       schema:
         type: string
+    ActionId:
+      name: actionId
+      in: path
+      required: true
+      schema:
+        type: string
   responses:
     Error:
       description: Typed API error
@@ -228,6 +338,13 @@ components:
       maxLength: 128
       pattern: "^[A-Za-z0-9._:/-]+$"
       description: Provider model name or alias passed to the selected runtime CLI.
+    ActionApprovalMode:
+      type: string
+      enum: [auto, manual, block]
+      description: >
+        auto emits action/policy/execution events and runs immediately; manual emits
+        approval.requested and waits for approveRunAction/denyRunAction; block emits
+        a terminal policy denial and never starts provider execution.
     RuntimeSelection:
       oneOf:
         - type: object
@@ -285,15 +402,39 @@ components:
           minLength: 1
         runtime:
           $ref: "#/components/schemas/RuntimeSelection"
+        approvalMode:
+          $ref: "#/components/schemas/ActionApprovalMode"
         metadata:
           type: object
           additionalProperties: true
+    RunActionDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [actionDigest]
+      properties:
+        actionDigest:
+          type: string
+          pattern: "^sha256:.+$"
+          description: Canonical action digest copied from approval.requested.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
     Run:
       type: object
       required: [id, status, runtime, task, input, lastEventSeq, queuedAt]
       properties:
         id:
           type: string
+          description: Run id for this specific run or turn.
+        conversationId:
+          type: string
+          description: Stable conversation id. For multi-turn conversations this is the first run id.
+        sessionId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Internal session id when a run has been promoted for continuation.
         status:
           $ref: "#/components/schemas/RunStatus"
         runtime:
@@ -326,6 +467,14 @@ components:
               type: string
     RunEvent:
       type: object
+      description: >
+        Persisted run event. Known public event types include action.proposed,
+        policy.evaluated, approval.requested, approval.decided,
+        execution.started, execution.completed, execution.failed,
+        agent.started, agent.progress, agent.no_progress, agent.message,
+        agent.response, agent.error, provider.stdout,
+        workspace.file_index_collected, workspace.patch_collected,
+        run.completed, run.failed, and run.cancelled.
       required: [runId, sequence, type, source, visibility, payload, isTruncated, createdAt]
       properties:
         runId:
@@ -334,6 +483,10 @@ components:
           type: integer
         type:
           type: string
+          description: >
+            Event type. `agent.no_progress` means the runtime detected a
+            suspected stuck loop, such as repeated failed commands, repeated
+            file edits, or long provider output without state transitions.
         providerEventType:
           type: string
         source:
@@ -380,6 +533,67 @@ components:
         createdAt:
           type: string
           format: date-time
+    ConversationMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 120000
+    ContinueRunResult:
+      type: object
+      required: [runId, turnNumber, conversationId]
+      properties:
+        runId:
+          type: string
+          description: New run id for the follow-up turn.
+        turnNumber:
+          type: integer
+          minimum: 1
+        conversationId:
+          type: string
+          description: Stable conversation id, equal to the first run id.
+    RunTurn:
+      type: object
+      required: [id, runId, turnNumber, prompt, createdAt]
+      properties:
+        id:
+          type: string
+        runId:
+          type: string
+          description: Run id for this specific turn.
+        turnNumber:
+          type: integer
+          minimum: 1
+        prompt:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    RunTurnsResult:
+      type: object
+      required: [conversationId, items]
+      properties:
+        conversationId:
+          type: string
+          description: Stable conversation id, equal to the first run id.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunTurn"
+    CloseRunResult:
+      type: object
+      required: [closed, conversationId, reclaimed]
+      properties:
+        closed:
+          type: boolean
+        conversationId:
+          type: string
+          description: Stable conversation id, equal to the first run id.
+        reclaimed:
+          type: boolean
     AgentResponse:
       type: object
       required: [text, parts]

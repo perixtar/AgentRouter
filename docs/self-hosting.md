@@ -102,6 +102,17 @@ There is no separate public session API in the pre-launch surface. Internal
 session rows are only an implementation detail for preserving the sandbox and
 provider thread between run-id turns.
 
+For continued conversations, `conversationId` and `runId` have different jobs:
+
+```txt
+conversationId  stable id for the whole conversation; this is the first run id
+runId           id for one specific turn; each continued turn gets a new run id
+```
+
+The `:runId` path parameter on `/messages`, `/turns`, and `/close` is the
+conversation id. A successful `/messages` call returns the new turn's `runId`
+plus the stable `conversationId`.
+
 Useful lifecycle env vars:
 
 ```sh

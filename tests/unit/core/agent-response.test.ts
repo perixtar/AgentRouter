@@ -148,6 +148,76 @@ describe("extractNormalizedAgentEventsFromStdout", () => {
       "raw hidden reasoning"
     );
   });
+
+  it("detects repeated failed Codex command executions as no-progress events", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_loop" }),
+      ...Array.from({ length: 3 }, () =>
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            command: "pnpm test",
+            exit_code: 1,
+            stdout: "1 failing test",
+            stderr: "Expected 1 to be 2"
+          }
+        })
+      )
+    ].join("\n");
+
+    expect(extractNormalizedAgentEventsFromStdout("codex", stdout)).toContainEqual({
+      type: "agent.no_progress",
+      visibility: "public",
+      providerEventType: "item.completed",
+      payload: expect.objectContaining({
+        provider: "codex",
+        signal: "repeated_command",
+        reason: "Repeated command failed with similar output",
+        command: "pnpm test",
+        occurrences: 3,
+        exitCode: 1,
+        outputDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
+      })
+    });
+  });
+
+  it("detects repeated Claude Code edit attempts as no-progress events", () => {
+    const editToolUse = {
+      type: "tool_use",
+      name: "Edit",
+      input: {
+        file_path: "/repo/src/service.ts",
+        old_string: "return false;",
+        new_string: "return true;"
+      }
+    };
+    const stdout = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "sess_loop" }),
+      ...Array.from({ length: 3 }, () =>
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [editToolUse]
+          }
+        })
+      )
+    ].join("\n");
+
+    expect(extractNormalizedAgentEventsFromStdout("claude_code", stdout)).toContainEqual({
+      type: "agent.no_progress",
+      visibility: "public",
+      providerEventType: "assistant",
+      payload: expect.objectContaining({
+        provider: "claude_code",
+        signal: "repeated_edit",
+        reason: "Repeated file edit did not produce meaningful progress",
+        path: "/repo/src/service.ts",
+        occurrences: 3,
+        editDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
+      })
+    });
+  });
 });
 
 describe("sanitizeProviderStdoutForArchive", () => {

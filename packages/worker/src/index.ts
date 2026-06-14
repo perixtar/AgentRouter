@@ -1,10 +1,17 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import {
+  bindCanonicalAction,
+  createNormalizedAgentEventExtractor,
   extractAgentResponseFromStdout,
   extractNormalizedAgentEventsFromStdout,
-  sanitizeProviderStdoutForArchive
+  sanitizeProviderStdoutForArchive,
+  type ActionApprovalDecision,
+  type ActionApprovalMode,
+  type ActionPolicyDecision,
+  type ControlPlaneAction,
+  type NormalizedAgentEventExtractor
 } from "@agentrouter/core";
 import {
   buildCredentialBoundaryProbeCommand,
@@ -304,7 +311,7 @@ async function executeOneShotRun(
     await ensureProviderRuntime(input.sandbox, sandbox.id, runtime.provider);
 
     const command = shellCommand(runtime.launchPlan.command, runtime.launchPlan.argv);
-    const result = await executeProviderCommand(input, run.id, sandbox.id, runtime, command, {
+    const result = await executeControlledProviderCommand(input, run, sandbox.id, runtime, command, {
       cwd: repoDir,
       env: providerRuntimeEnv(runtime.launchPlan.env),
       timeoutSeconds: 0
@@ -552,7 +559,15 @@ async function executeSessionRun(
     });
 
     const command = shellCommand(launchPlan.command, launchPlan.argv);
-    const result = await input.sandbox.executeCommand(sandboxId, command, {
+    const runtime: RuntimeLaunch = {
+      provider: "codex",
+      displayName: "Codex",
+      eventSource: "codex",
+      credentialBoundary,
+      credentialCanaries: canaries,
+      launchPlan
+    };
+    const result = await executeControlledProviderCommand(input, run, sandboxId, runtime, command, {
       cwd: repoDir,
       env: providerRuntimeEnv(launchPlan.env),
       timeoutSeconds: 0
@@ -701,6 +716,21 @@ interface TerminalRunSnapshot {
 interface ProviderCommandResult extends SandboxCommandResult {
   normalizedEventsStreamed: boolean;
 }
+
+interface ControlPlaneEventPayload extends Record<string, unknown> {
+  eventId: string;
+  actionId: string;
+  actionDigest: string;
+  argsDigest: string;
+  actor: string;
+}
+
+interface ApprovalDecisionPayload extends ControlPlaneEventPayload {
+  decision: ActionApprovalDecision;
+}
+
+const runtimePolicyId = "provider-runtime-execution";
+const runtimePolicyVersion = "2026-06-13";
 
 function providerFailureReason(
   runtime: RuntimeLaunch,
@@ -932,6 +962,242 @@ async function requireSuccessfulCommand(
   }
 }
 
+async function executeControlledProviderCommand(
+  input: RunOneWorkerIterationInput,
+  run: RunRecord,
+  sandboxId: string,
+  runtime: RuntimeLaunch,
+  command: string,
+  options: SandboxCommandOptions
+): Promise<ProviderCommandResult> {
+  const action = runtimeCommandAction(run, runtime, sandboxId);
+  const binding = bindCanonicalAction(action);
+  const actionId = `action_${randomUUID()}`;
+  const executionId = `execution_${randomUUID()}`;
+  const proposed = await appendControlPlaneEvent(input, run.id, "action.proposed", {
+    eventId: `evt_${randomUUID()}`,
+    actionId,
+    actionDigest: binding.actionDigest,
+    argsDigest: binding.argsDigest,
+    actor: "agent",
+    actionName: binding.action.name,
+    targetResource: binding.action.target,
+    schemaVersion: binding.action.schemaVersion,
+    action: binding.action
+  });
+
+  const approvalMode = approvalModeFromRun(run);
+  const policyDecision = policyDecisionForApprovalMode(approvalMode);
+  const policy = await appendControlPlaneEvent(input, run.id, "policy.evaluated", {
+    eventId: `evt_${randomUUID()}`,
+    priorEventId: proposed.eventId,
+    actionId,
+    actionDigest: binding.actionDigest,
+    argsDigest: binding.argsDigest,
+    actor: "policy",
+    policyId: runtimePolicyId,
+    policyVersion: runtimePolicyVersion,
+    decision: policyDecision,
+    reason: policyReason(policyDecision),
+    terminalState: policyDecision === "blocked" ? "blocked" : undefined
+  });
+
+  if (policyDecision === "blocked") {
+    throw new RunFailure("policy_denied", "Provider runtime execution was blocked by policy");
+  }
+
+  let executionPriorEventId = policy.eventId;
+  if (policyDecision === "requires_approval") {
+    const request = await appendControlPlaneEvent(input, run.id, "approval.requested", {
+      eventId: `evt_${randomUUID()}`,
+      priorEventId: policy.eventId,
+      actionId,
+      actionDigest: binding.actionDigest,
+      argsDigest: binding.argsDigest,
+      actor: "system",
+      requestId: `approval_${randomUUID()}`,
+      actionName: binding.action.name,
+      targetResource: binding.action.target,
+      action: binding.action
+    });
+    const approval = await waitForApprovalDecision(input, run.id, actionId);
+    if (approval.actionDigest !== binding.actionDigest) {
+      throw new RunFailure(
+        "approval_digest_mismatch",
+        "Approval decision was bound to a different action digest"
+      );
+    }
+    if (approval.decision === "denied") {
+      throw new RunFailure("approval_denied", "Provider runtime execution was denied");
+    }
+    executionPriorEventId = approval.eventId || request.eventId;
+  }
+
+  const started = await appendControlPlaneEvent(input, run.id, "execution.started", {
+    eventId: `evt_${randomUUID()}`,
+    priorEventId: executionPriorEventId,
+    actionId,
+    actionDigest: binding.actionDigest,
+    argsDigest: binding.argsDigest,
+    actor: "runtime",
+    executionId,
+    status: "started"
+  });
+
+  try {
+    const result = await executeProviderCommand(input, run.id, sandboxId, runtime, command, options);
+    assertNoCredentialLeaks(
+      result.stdout + result.stderr,
+      runtime.credentialCanaries,
+      "provider output"
+    );
+    const terminalEvent = result.exitCode === 0 ? "execution.completed" : "execution.failed";
+    await appendControlPlaneEvent(input, run.id, terminalEvent, {
+      eventId: `evt_${randomUUID()}`,
+      priorEventId: started.eventId,
+      actionId,
+      actionDigest: binding.actionDigest,
+      argsDigest: binding.argsDigest,
+      actor: "runtime",
+      executionId,
+      status: result.exitCode === 0 ? "completed" : "failed",
+      exitCode: result.exitCode,
+      terminalState: result.exitCode === 0 ? "completed" : "failed"
+    });
+    return result;
+  } catch (error) {
+    await appendControlPlaneEvent(input, run.id, "execution.failed", {
+      eventId: `evt_${randomUUID()}`,
+      priorEventId: started.eventId,
+      actionId,
+      actionDigest: binding.actionDigest,
+      argsDigest: binding.argsDigest,
+      actor: "runtime",
+      executionId,
+      status: "failed",
+      reason: error instanceof Error ? error.message : "Provider execution failed",
+      terminalState: "failed"
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function runtimeCommandAction(
+  run: RunRecord,
+  runtime: RuntimeLaunch,
+  sandboxId: string
+): ControlPlaneAction {
+  return {
+    type: "runtime_command",
+    name: `${runtime.provider}.launch`,
+    target: `daytona:${sandboxId}`,
+    schemaVersion: "agentrouter.runtime_command.v1",
+    args: {
+      provider: runtime.provider,
+      runtimeKind: run.runtimeKind,
+      runtimeMode: run.runtimeMode,
+      runtimeModel: run.runtimeModel,
+      command: runtime.launchPlan.command,
+      argvWithoutPrompt: runtime.launchPlan.argv.slice(0, -1),
+      promptSha256: hashSha256String(taskFromRun(run)),
+      cwd: runtime.launchPlan.cwd
+    }
+  };
+}
+
+async function appendControlPlaneEvent(
+  input: RunOneWorkerIterationInput,
+  runId: string,
+  eventType: string,
+  payload: ControlPlaneEventPayload
+): Promise<ControlPlaneEventPayload> {
+  await withClient(input, async (client) => {
+    await new RunRepository(client).appendEvent({
+      runId,
+      source: "worker",
+      eventType,
+      visibility: "public",
+      payload
+    });
+  });
+  return payload;
+}
+
+function approvalModeFromRun(run: RunRecord): ActionApprovalMode {
+  const mode = run.input.approvalMode;
+  return mode === "manual" || mode === "block" || mode === "auto" ? mode : "auto";
+}
+
+function policyDecisionForApprovalMode(mode: ActionApprovalMode): ActionPolicyDecision {
+  if (mode === "block") return "blocked";
+  if (mode === "manual") return "requires_approval";
+  return "allowed";
+}
+
+function policyReason(decision: ActionPolicyDecision): string {
+  if (decision === "blocked") return "Run requested blocked provider execution";
+  if (decision === "requires_approval") return "Run requires explicit approval before execution";
+  return "Run policy allows provider execution without manual approval";
+}
+
+async function waitForApprovalDecision(
+  input: RunOneWorkerIterationInput,
+  runId: string,
+  actionId: string
+): Promise<ApprovalDecisionPayload> {
+  for (;;) {
+    const decision = await withClient(input, async (client) => {
+      const repo = new RunRepository(client);
+      const run = await repo.getRunInternal(runId);
+      if (run?.status === "cancelling" || run?.status === "cancelled") {
+        throw new RunFailure("run_cancelled", "Run was cancelled while waiting for approval");
+      }
+
+      const events = await repo.listEventsInternal({ runId, limit: 500 });
+      const event = events.find(
+        (item) => item.eventType === "approval.decided" && item.payload.actionId === actionId
+      );
+      return event ? approvalDecisionPayload(event.payload) : undefined;
+    });
+    if (decision) return decision;
+    await sleep(250);
+  }
+}
+
+function approvalDecisionPayload(payload: Record<string, unknown>): ApprovalDecisionPayload {
+  const decision = payload.decision;
+  if (decision !== "approved" && decision !== "denied") {
+    throw new RunFailure("approval_decision_invalid", "Approval decision is invalid");
+  }
+
+  return {
+    eventId: stringPayload(payload, "eventId"),
+    priorEventId: optionalStringPayload(payload, "priorEventId"),
+    actionId: stringPayload(payload, "actionId"),
+    actionDigest: stringPayload(payload, "actionDigest"),
+    argsDigest: stringPayload(payload, "argsDigest"),
+    actor: stringPayload(payload, "actor"),
+    decision
+  };
+}
+
+function stringPayload(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new RunFailure("control_event_invalid", `Control-plane event is missing ${key}`);
+  }
+  return value;
+}
+
+function optionalStringPayload(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function hashSha256String(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
 async function executeProviderCommand(
   input: RunOneWorkerIterationInput,
   runId: string,
@@ -948,11 +1214,12 @@ async function executeProviderCommand(
   let stdout = "";
   let stderr = "";
   let pendingStdout = "";
+  const eventExtractor = createNormalizedAgentEventExtractor(runtime.provider);
 
   const flushStdoutLine = async (line: string): Promise<void> => {
     if (!line.trim()) return;
     assertNoCredentialLeaks(line, runtime.credentialCanaries, "provider output");
-    await appendNormalizedAgentEvents(input, runId, runtime.eventSource, line);
+    await appendNormalizedAgentEvents(input, runId, runtime.eventSource, line, eventExtractor);
   };
 
   const result = await input.sandbox.executeCommandStreaming(
@@ -1035,9 +1302,12 @@ async function appendNormalizedAgentEvents(
   input: RunOneWorkerIterationInput,
   runId: string,
   providerSource: string,
-  stdout: string
+  stdout: string,
+  extractor?: NormalizedAgentEventExtractor
 ): Promise<void> {
-  const events = extractNormalizedAgentEventsFromStdout(providerSource as RuntimeProvider, stdout);
+  const events = extractor
+    ? stdout.split(/\r?\n/).flatMap((line) => extractor.appendLine(line))
+    : extractNormalizedAgentEventsFromStdout(providerSource as RuntimeProvider, stdout);
   if (events.length === 0) return;
 
   await withClient(input, async (client) => {
