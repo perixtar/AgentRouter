@@ -268,6 +268,52 @@ Run the SDK example:
 pnpm example:quickstart:run
 ```
 
+## SDK Event Model
+
+`streamAgent` exposes two streaming surfaces:
+
+- `stream.events` gives raw persisted run events for audit and replay.
+- `stream.fullStream` gives app-friendly parts for progress, approvals,
+  execution, messages, final text, errors, and terminal state.
+
+The control-plane event chain exists so products can show more than logs:
+
+| Raw event | SDK part | Purpose |
+| --- | --- | --- |
+| `action.proposed` | `action` | Defines the exact runtime action AgentRouter may execute. |
+| `policy.evaluated` | `progress` | Records whether policy allowed, blocked, or required approval for that action. |
+| `approval.requested` | `approval_request` | Pauses a manual run until the app approves or denies the action digest. |
+| `approval.decided` | `approval_decision` | Records the immutable approve/deny decision. |
+| `execution.started` | `execution` | Shows that the approved action started in the sandbox. |
+| `execution.completed` / `execution.failed` | `execution` | Shows whether sandbox execution finished or failed. |
+
+Manual approval:
+
+```ts
+const stream = await streamAgent({
+  client,
+  task: "Run tests and summarize failures.",
+  runtime: codex({ mode: "full_access" }),
+  approvalMode: "manual"
+});
+
+for await (const part of stream.fullStream) {
+  if (part.type === "approval_request") {
+    await client.approveRunAction({
+      runId: stream.run.id,
+      actionId: part.actionId,
+      actionDigest: part.actionDigest
+    });
+  }
+}
+```
+
+Run the approval example:
+
+```sh
+pnpm example:recipe:approval-events
+```
+
 ## Multi-Turn Runs
 
 A run id can become the conversation handle. Start a run, then continue it by

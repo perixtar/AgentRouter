@@ -460,6 +460,165 @@ describe("AgentRouter TypeScript SDK", () => {
     });
   });
 
+  it("surfaces approval and execution events as typed stream parts", async () => {
+    const sdk = agentrouter({
+      baseUrl,
+      apiKey: config.apiKey
+    });
+
+    const stream = await streamAgent({
+      client: sdk,
+      task: "Run only after approval",
+      runtime: codex({ mode: "default", model: "gpt-4o" }),
+      approvalMode: "manual",
+      pollIntervalMs: 1,
+      maxWaitMs: 10_000
+    });
+
+    const actionId = `action_${randomUUID()}`;
+    const actionDigest = "sha256:sdk_action";
+    const argsDigest = "sha256:sdk_args";
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        const repo = new RunRepository(client);
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "action.proposed",
+          visibility: "public",
+          payload: {
+            eventId: `evt_${randomUUID()}`,
+            actionId,
+            actionDigest,
+            argsDigest,
+            actor: "agent",
+            action: {
+              type: "runtime_command",
+              name: "codex.launch",
+              target: "daytona:sandbox",
+              schemaVersion: "agentrouter.runtime_command.v1",
+              args: { provider: "codex" }
+            }
+          }
+        });
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "approval.requested",
+          visibility: "public",
+          payload: {
+            eventId: `evt_${randomUUID()}`,
+            actionId,
+            actionDigest,
+            argsDigest,
+            actor: "system",
+            requestId: `approval_${randomUUID()}`
+          }
+        });
+      });
+    } finally {
+      client.release();
+    }
+
+    const approval = await sdk.approveRunAction({
+      runId: stream.run.id,
+      actionId,
+      actionDigest,
+      reason: "SDK approval test"
+    });
+    expect(approval).toMatchObject({
+      type: "approval.decided",
+      payload: {
+        actionId,
+        actionDigest,
+        decision: "approved"
+      }
+    });
+
+    const finishClient = await pool.connect();
+    try {
+      await withSearchPath(finishClient, schema, async () => {
+        const repo = new RunRepository(finishClient);
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "execution.started",
+          visibility: "public",
+          payload: {
+            eventId: `evt_${randomUUID()}`,
+            actionId,
+            actionDigest,
+            argsDigest,
+            actor: "runtime",
+            executionId: `execution_${randomUUID()}`,
+            status: "started"
+          }
+        });
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "execution.completed",
+          visibility: "public",
+          payload: {
+            eventId: `evt_${randomUUID()}`,
+            actionId,
+            actionDigest,
+            argsDigest,
+            actor: "runtime",
+            executionId: `execution_${randomUUID()}`,
+            status: "completed",
+            terminalState: "completed"
+          }
+        });
+        await repo.appendEvent({
+          runId: stream.run.id,
+          source: "worker",
+          eventType: "run.completed",
+          visibility: "public",
+          payload: { message: "done" }
+        });
+        await repo.updateRunStatus(stream.run.id, "starting");
+        await repo.updateRunStatus(stream.run.id, "running");
+        await repo.updateRunStatus(stream.run.id, "completed");
+      });
+    } finally {
+      finishClient.release();
+    }
+
+    const streamParts = [];
+    for await (const part of stream.fullStream) {
+      streamParts.push(part);
+    }
+    expect(streamParts).toEqual([
+      expect.objectContaining({ type: "action", actionId, actionDigest }),
+      expect.objectContaining({ type: "approval_request", actionId, actionDigest }),
+      expect.objectContaining({
+        type: "approval_decision",
+        actionId,
+        actionDigest,
+        decision: "approved"
+      }),
+      expect.objectContaining({
+        type: "execution",
+        actionId,
+        actionDigest,
+        status: "started"
+      }),
+      expect.objectContaining({
+        type: "execution",
+        actionId,
+        actionDigest,
+        status: "completed"
+      }),
+      expect.objectContaining({
+        type: "done",
+        status: "completed"
+      })
+    ]);
+  });
+
   it("drains events up to terminal lastEventSeq before ending a stream", async () => {
     const runId = "run_stream_terminal_race";
     const eventPageRequests: number[] = [];

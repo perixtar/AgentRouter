@@ -28,6 +28,9 @@ export interface ClaudeCodeRuntimeSelection {
 }
 
 export type RuntimeSelection = CodexRuntimeSelection | ClaudeCodeRuntimeSelection;
+export type ActionApprovalMode = "auto" | "manual" | "block";
+export type ActionApprovalDecision = "approved" | "denied";
+export type ExecutionStreamStatus = "started" | "completed" | "failed";
 
 export type ResolvedRuntimeSelection =
   | (CodexRuntimeSelection & { mode: CodexRuntimeMode })
@@ -36,6 +39,7 @@ export type ResolvedRuntimeSelection =
 export interface CreateRunRequest {
   task: string;
   runtime?: RuntimeSelection;
+  approvalMode?: ActionApprovalMode;
   metadata?: Record<string, unknown>;
   idempotencyKey?: string;
 }
@@ -117,6 +121,36 @@ export interface AgentRunResult {
 
 export type AgentStreamPart =
   | { type: "progress"; text: string; event: RunEvent }
+  | {
+      type: "action";
+      text: string;
+      actionId: string;
+      actionDigest: string;
+      event: RunEvent;
+    }
+  | {
+      type: "approval_request";
+      text: string;
+      actionId: string;
+      actionDigest: string;
+      event: RunEvent;
+    }
+  | {
+      type: "approval_decision";
+      text: string;
+      actionId: string;
+      actionDigest: string;
+      decision: ActionApprovalDecision;
+      event: RunEvent;
+    }
+  | {
+      type: "execution";
+      text: string;
+      actionId: string;
+      actionDigest: string;
+      status: ExecutionStreamStatus;
+      event: RunEvent;
+    }
   | { type: "message"; text: string; event: RunEvent }
   | { type: "text"; text: string; event: RunEvent }
   | { type: "error"; text: string; event: RunEvent }
@@ -167,6 +201,13 @@ export interface CloseRunResult {
   reclaimed: boolean;
 }
 
+export interface RunActionDecisionRequest {
+  runId: string;
+  actionId: string;
+  actionDigest: string;
+  reason?: string;
+}
+
 export interface AgentRouterClient {
   createRun(input: CreateRunRequest): Promise<Run>;
   listRuns(query?: { status?: string; limit?: number }): Promise<{ items: Run[] }>;
@@ -181,6 +222,8 @@ export interface AgentRouterClient {
   downloadArtifact(runId: string, artifactId: string): Promise<ArrayBuffer>;
   streamRun(runId: string, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
   createRunAndWait(input: CreateAndWaitRequest): Promise<RunSession>;
+  approveRunAction(input: RunActionDecisionRequest): Promise<RunEvent>;
+  denyRunAction(input: RunActionDecisionRequest): Promise<RunEvent>;
   // ── run-id multi-turn (M1): continue / inspect / close a conversation by run id ──
   continueRun(runId: string, message: string): Promise<ContinueRunResult>;
   getRunTurns(runId: string): Promise<RunTurnsResult>;
@@ -330,8 +373,8 @@ export async function streamAgent(input: StreamAgentRequest): Promise<AgentRunSt
   }
 
   if (isStreamAgentCreateRequest(input)) {
-    const { task, runtime, metadata, idempotencyKey } = input;
-    const request: CreateRunRequest = { task, runtime, metadata, idempotencyKey };
+    const { task, runtime, approvalMode, metadata, idempotencyKey } = input;
+    const request: CreateRunRequest = { task, runtime, approvalMode, metadata, idempotencyKey };
     const run = await client.createRun(request);
     return {
       run,
@@ -412,6 +455,14 @@ class AgentRouterClientImpl implements AgentRouterClient {
     return this.http.createAndWait(input);
   }
 
+  async approveRunAction(input: RunActionDecisionRequest): Promise<RunEvent> {
+    return this.http.decideRunAction(input, "approve");
+  }
+
+  async denyRunAction(input: RunActionDecisionRequest): Promise<RunEvent> {
+    return this.http.decideRunAction(input, "deny");
+  }
+
   // ── run-id multi-turn (M1) ──
   async continueRun(runId: string, message: string): Promise<ContinueRunResult> {
     // A run becomes continuable the instant its grace-park (suspend + promote
@@ -445,7 +496,7 @@ class AgentRouterClientImpl implements AgentRouterClient {
     // but not yet the session, so it returns reclaimed:false. Retry briefly for
     // completed continuable Codex runs; return immediately for truly
     // non-continuable runtimes or once the deadline is exhausted.
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + 30_000;
     for (let attempt = 0; ; attempt++) {
       const result = await this.http.closeRun(runId);
       if (result.reclaimed || Date.now() >= deadline) return result;
@@ -484,6 +535,24 @@ class AgentRouterHttpClient {
       headers: idempotencyKey ? { "idempotency-key": idempotencyKey } : undefined,
       body
     });
+  }
+
+  async decideRunAction(
+    input: RunActionDecisionRequest,
+    decision: "approve" | "deny"
+  ): Promise<RunEvent> {
+    return this.request<RunEvent>(
+      `/v1/runs/${encodeURIComponent(input.runId)}/actions/${encodeURIComponent(
+        input.actionId
+      )}/${decision}`,
+      {
+        method: "POST",
+        body: {
+          actionDigest: input.actionDigest,
+          reason: input.reason
+        }
+      }
+    );
   }
 
   async list(query: { status?: string; limit?: number } = {}): Promise<{ items: Run[] }> {
@@ -736,6 +805,66 @@ function textFromAgentResponseEvent(event: RunEvent): string | undefined {
 }
 
 function streamPartFromRunEvent(event: RunEvent): AgentStreamPart | undefined {
+  if (event.type === "action.proposed") {
+    const actionId = stringPayload(event, "actionId");
+    const actionDigest = stringPayload(event, "actionDigest");
+    if (!actionId || !actionDigest) return undefined;
+    return {
+      type: "action",
+      text: `Action proposed: ${actionNameFromPayload(event.payload)}`,
+      actionId,
+      actionDigest,
+      event
+    };
+  }
+
+  if (event.type === "approval.requested") {
+    const actionId = stringPayload(event, "actionId");
+    const actionDigest = stringPayload(event, "actionDigest");
+    if (!actionId || !actionDigest) return undefined;
+    return {
+      type: "approval_request",
+      text: `Approval requested for ${actionNameFromPayload(event.payload)}`,
+      actionId,
+      actionDigest,
+      event
+    };
+  }
+
+  if (event.type === "approval.decided") {
+    const actionId = stringPayload(event, "actionId");
+    const actionDigest = stringPayload(event, "actionDigest");
+    const decision = approvalDecisionFromPayload(event.payload);
+    if (!actionId || !actionDigest || !decision) return undefined;
+    return {
+      type: "approval_decision",
+      text: `Approval ${decision}`,
+      actionId,
+      actionDigest,
+      decision,
+      event
+    };
+  }
+
+  if (
+    event.type === "execution.started" ||
+    event.type === "execution.completed" ||
+    event.type === "execution.failed"
+  ) {
+    const actionId = stringPayload(event, "actionId");
+    const actionDigest = stringPayload(event, "actionDigest");
+    const status = executionStatusFromEventType(event.type);
+    if (!actionId || !actionDigest) return undefined;
+    return {
+      type: "execution",
+      text: `Execution ${status}`,
+      actionId,
+      actionDigest,
+      status,
+      event
+    };
+  }
+
   if (event.type === "agent.response") {
     const text = stringPayload(event, "text");
     return text ? { type: "text", text, event } : undefined;
@@ -774,9 +903,38 @@ function progressTextFromEvent(event: RunEvent): string | undefined {
   if (event.type === "agent.started") return "Agent started";
   if (event.type === "sandbox.created") return "Sandbox ready";
   if (event.type === "credential_boundary.verified") return "Credential boundary verified";
+  if (event.type === "policy.evaluated") {
+    const decision = stringPayload(event, "decision");
+    return decision ? `Policy ${decision}` : "Policy evaluated";
+  }
   if (event.type === "workspace.file_index_collected") return "Workspace file index collected";
   if (event.type === "workspace.patch_collected") return "Workspace patch collected";
   return undefined;
+}
+
+function approvalDecisionFromPayload(
+  payload: Record<string, unknown>
+): ActionApprovalDecision | undefined {
+  return payload.decision === "approved" || payload.decision === "denied"
+    ? payload.decision
+    : undefined;
+}
+
+function executionStatusFromEventType(eventType: string): ExecutionStreamStatus {
+  if (eventType === "execution.completed") return "completed";
+  if (eventType === "execution.failed") return "failed";
+  return "started";
+}
+
+function actionNameFromPayload(payload: Record<string, unknown>): string {
+  const action = payload.action;
+  if (action && typeof action === "object") {
+    const name = (action as { name?: unknown }).name;
+    if (typeof name === "string" && name.length > 0) return name;
+  }
+
+  const name = payload.actionName;
+  return typeof name === "string" && name.length > 0 ? name : "runtime action";
 }
 
 function stringPayload(event: RunEvent, key: string): string | undefined {

@@ -2,14 +2,14 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadDotEnv } from "dotenv";
 import { Pool } from "pg";
-import { agentrouter, claudeCode, streamAgent, type RunEvent } from "@agentrouterhq/sdk";
+import { agentrouter, claudeCode, streamAgent } from "@agentrouterhq/sdk";
 import { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import { buildApiServer } from "@agentrouter/api";
 import { parseAgentRouterEnv } from "@agentrouter/config";
 import { applyPhase1Migrations, dropSchema } from "@agentrouter/db";
 import { DaytonaSandboxDriver } from "@agentrouter/sandbox-daytona";
 import { runOneWorkerIteration, runWorkerLoop } from "@agentrouter/worker";
-import { assertSuccessfulE2ERun } from "./assertions.js";
+import { assertSuccessfulE2ERun, collectEventsAndApproveActions } from "./assertions.js";
 
 loadDotEnv();
 
@@ -90,6 +90,7 @@ describeRealE2E("real Claude Code API + worker E2E", () => {
         maxWaitMs: 10 * 60 * 1000,
         task:
           "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CLAUDE_E2E_OK\\n' > reports/claude-smoke.txt. Then summarize the change in one sentence.",
+        approvalMode: "manual",
         runtime: claudeCode({
           permissionMode: "bypassPermissions",
           ...(runtimeModel ? { model: runtimeModel } : {})
@@ -97,10 +98,7 @@ describeRealE2E("real Claude Code API + worker E2E", () => {
       });
       runIds.push(stream.run.id);
 
-      const events: RunEvent[] = [];
-      for await (const event of stream.events) {
-        events.push(event);
-      }
+      const events = await collectEventsAndApproveActions(sdk, stream.events);
       const result = await stream.finalResult;
 
       await assertSuccessfulE2ERun({
@@ -111,6 +109,23 @@ describeRealE2E("real Claude Code API + worker E2E", () => {
         runtimeKind: "claude_code",
         marker: "AR_CLAUDE_E2E_OK",
         createdPath: "reports/claude-smoke.txt",
+        requiredEventTypes: [
+          "run.claimed",
+          "sandbox.created",
+          "credential_boundary.verified",
+          "action.proposed",
+          "policy.evaluated",
+          "approval.requested",
+          "approval.decided",
+          "execution.started",
+          "execution.completed",
+          "provider.stdout",
+          "provider.stderr",
+          "agent.response",
+          "workspace.file_index_collected",
+          "workspace.patch_collected",
+          "run.completed"
+        ],
         secretCanaries: [
           config.anthropicApiKey,
           config.codexApiKey,

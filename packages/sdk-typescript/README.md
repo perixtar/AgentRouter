@@ -111,6 +111,60 @@ for await (const text of stream.textStream) {
 }
 ```
 
+## Control-plane events
+
+AgentRouter streams two related surfaces:
+
+- `stream.events` yields raw persisted `RunEvent` records exactly as stored by
+  the runtime control plane.
+- `stream.fullStream` yields ergonomic `AgentStreamPart` objects for app code.
+
+Use `fullStream` for most products. Drop to raw events when you need the
+sequence number, original payload, artifact references, or audit trail.
+
+| Raw event | `fullStream` part | Purpose |
+| --- | --- | --- |
+| `action.proposed` | `action` | AgentRouter has defined the exact runtime action it may execute, including `actionId`, `actionDigest`, target, and schema version. |
+| `policy.evaluated` | `progress` | The configured policy decided whether that action is `allowed`, `requires_approval`, or `blocked`. |
+| `approval.requested` | `approval_request` | The run is paused until your app records an approval decision for the same `actionDigest`. |
+| `approval.decided` | `approval_decision` | A human or approval system approved or denied the action. Repeated identical decisions are deterministic no-ops. |
+| `execution.started` | `execution` | The approved action started inside the sandbox. |
+| `execution.completed` | `execution` | The action completed successfully. |
+| `execution.failed` | `execution` | Runtime execution failed after policy/approval; this does not rewrite the approval decision. |
+| `agent.progress` | `progress` | Public progress summary from the provider stream. Hidden reasoning is not exposed. |
+| `agent.message` | `message` | Assistant-visible message content before the final normalized response. |
+| `agent.response` | `text` | Final normalized agent response text. |
+| `run.completed`, `run.failed`, `run.cancelled` | `done` or `error` | Terminal run state. |
+
+Manual approval example:
+
+```ts
+const stream = await streamAgent({
+  client,
+  task: "Run the repository tests and summarize failures.",
+  runtime: codex({ mode: "full_access" }),
+  approvalMode: "manual"
+});
+
+for await (const part of stream.fullStream) {
+  if (part.type === "approval_request") {
+    await client.approveRunAction({
+      runId: stream.run.id,
+      actionId: part.actionId,
+      actionDigest: part.actionDigest,
+      reason: "Approved by CI policy"
+    });
+  }
+
+  if (part.type === "execution") {
+    console.log(part.status);
+  }
+}
+```
+
+`actionDigest` is the important safety field. An approval for digest A cannot
+start execution for digest B.
+
 ## Continue a conversation
 
 AgentRouter can keep a sandbox and provider thread alive after a run finishes.
@@ -221,6 +275,7 @@ Available client methods:
 | `listRunEvents`, `streamRun` | Read observable run events |
 | `getRunSession` | Get the final run response, event cursor, and artifact manifest |
 | `listRunArtifacts`, `downloadArtifact` | Inspect and download artifacts |
+| `approveRunAction`, `denyRunAction` | Record an immutable approval decision for an `approval.requested` action digest |
 | `continueRun`, `getRunTurns`, `closeRun` | Continue, inspect, or close a run-id conversation |
 
 ## Runtime options

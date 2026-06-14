@@ -42,6 +42,7 @@
     "example:recipe:continue": "tsx examples/recipes/continue-conversation.ts",
     "example:recipe:artifacts": "tsx examples/recipes/artifacts.ts",
     "example:recipe:runtime-modes": "tsx examples/recipes/runtime-modes.ts",
+    "example:recipe:approval-events": "tsx examples/recipes/approval-events.ts",
     "example:recipe:low-level": "tsx examples/recipes/low-level-client.ts",
     "example:recipe:errors": "tsx examples/recipes/error-handling.ts",
     "example:recipe:tool-boundary": "tsx examples/recipes/tool-boundary.ts",
@@ -51,6 +52,7 @@
     "example:claude-code": "pnpm example:quickstart:claude",
     "example:coding-agent-files": "pnpm example:recipe:artifacts",
     "example:create-tool": "pnpm example:recipe:tool-boundary",
+    "example:approval-events": "pnpm example:recipe:approval-events",
     "example:tool-boundary": "pnpm example:recipe:tool-boundary",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -84,5 +86,14 @@
     "overrides": {
       "@opentelemetry/otlp-transformer@0.217.0>protobufjs": "8.5.0"
     }
-  }
+  },
+  "description": "Self-hosted runtime for running Codex and Claude Code agents in secure sandboxes.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples",
+    "test": "tests"
+  },
+  "keywords": [],
+  "author": ""
 }

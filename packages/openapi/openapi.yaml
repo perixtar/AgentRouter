@@ -155,6 +155,54 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Run"
+  /v1/runs/{runId}/actions/{actionId}/approve:
+    post:
+      operationId: approveRunAction
+      description: Approve a pending action using the canonical action digest from approval.requested.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunActionDecisionRequest"
+      responses:
+        "200":
+          description: Approval decision event, or the existing same decision for an idempotent retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunEvent"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/runs/{runId}/actions/{actionId}/deny:
+    post:
+      operationId: denyRunAction
+      description: Deny a pending action using the canonical action digest from approval.requested.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunActionDecisionRequest"
+      responses:
+        "200":
+          description: Approval decision event, or the existing same decision for an idempotent retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunEvent"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
   /v1/runs/{runId}/messages:
     post:
       operationId: continueRun
@@ -261,6 +309,12 @@ components:
       required: true
       schema:
         type: string
+    ActionId:
+      name: actionId
+      in: path
+      required: true
+      schema:
+        type: string
   responses:
     Error:
       description: Typed API error
@@ -284,6 +338,13 @@ components:
       maxLength: 128
       pattern: "^[A-Za-z0-9._:/-]+$"
       description: Provider model name or alias passed to the selected runtime CLI.
+    ActionApprovalMode:
+      type: string
+      enum: [auto, manual, block]
+      description: >
+        auto emits action/policy/execution events and runs immediately; manual emits
+        approval.requested and waits for approveRunAction/denyRunAction; block emits
+        a terminal policy denial and never starts provider execution.
     RuntimeSelection:
       oneOf:
         - type: object
@@ -341,9 +402,24 @@ components:
           minLength: 1
         runtime:
           $ref: "#/components/schemas/RuntimeSelection"
+        approvalMode:
+          $ref: "#/components/schemas/ActionApprovalMode"
         metadata:
           type: object
           additionalProperties: true
+    RunActionDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [actionDigest]
+      properties:
+        actionDigest:
+          type: string
+          pattern: "^sha256:.+$"
+          description: Canonical action digest copied from approval.requested.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
     Run:
       type: object
       required: [id, status, runtime, task, input, lastEventSeq, queuedAt]

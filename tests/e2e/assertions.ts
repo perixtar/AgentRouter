@@ -7,6 +7,10 @@ const defaultRequiredEventTypes = [
   "run.claimed",
   "sandbox.created",
   "credential_boundary.verified",
+  "action.proposed",
+  "policy.evaluated",
+  "execution.started",
+  "execution.completed",
   "provider.stdout",
   "provider.stderr",
   "agent.response",
@@ -60,6 +64,9 @@ export async function assertSuccessfulE2ERun(
   for (const eventType of requiredEventTypes) {
     expect(events.map((event) => event.type)).toContain(eventType);
   }
+  assertCausalActionEvents(events, {
+    requiresApproval: requiredEventTypes.includes("approval.requested")
+  });
   expect(events.some((event) => event.type.startsWith("agent.") && event.type !== "agent.response")).toBe(
     true
   );
@@ -164,10 +171,105 @@ export async function assertSuccessfulE2ERun(
   }
 }
 
+export async function collectEventsAndApproveActions(
+  client: AgentRouterClient,
+  eventStream: AsyncGenerator<RunEvent>
+): Promise<RunEvent[]> {
+  const events: RunEvent[] = [];
+  const approved = new Set<string>();
+
+  for await (const event of eventStream) {
+    events.push(event);
+    if (event.type !== "approval.requested") continue;
+
+    const actionId = stringPayload(event, "actionId");
+    const actionDigest = stringPayload(event, "actionDigest");
+    if (approved.has(actionId)) continue;
+    approved.add(actionId);
+
+    await client.approveRunAction({
+      runId: event.runId,
+      actionId,
+      actionDigest,
+      reason: "Real E2E test approved this provider runtime action"
+    });
+  }
+
+  return events;
+}
+
+function assertCausalActionEvents(
+  events: RunEvent[],
+  options: { requiresApproval: boolean }
+): void {
+  const proposed = eventByType(events, "action.proposed");
+  const policy = eventByType(events, "policy.evaluated");
+  const started = eventByType(events, "execution.started");
+  const completed = eventByType(events, "execution.completed");
+  const actionId = stringPayload(proposed, "actionId");
+  const actionDigest = stringPayload(proposed, "actionDigest");
+  const argsDigest = stringPayload(proposed, "argsDigest");
+
+  expect(policy.payload).toMatchObject({
+    priorEventId: proposed.payload.eventId,
+    actionId,
+    actionDigest,
+    argsDigest
+  });
+
+  if (options.requiresApproval) {
+    const requested = eventByType(events, "approval.requested");
+    const decided = eventByType(events, "approval.decided");
+    expect(policy.payload.decision).toBe("requires_approval");
+    expect(requested.payload).toMatchObject({
+      priorEventId: policy.payload.eventId,
+      actionId,
+      actionDigest,
+      argsDigest
+    });
+    expect(decided.payload).toMatchObject({
+      priorEventId: requested.payload.eventId,
+      actionId,
+      actionDigest,
+      argsDigest,
+      decision: "approved"
+    });
+    expect(started.payload.priorEventId).toBe(decided.payload.eventId);
+  } else {
+    expect(policy.payload.decision).toBe("allowed");
+    expect(events.map((event) => event.type)).not.toContain("approval.requested");
+    expect(events.map((event) => event.type)).not.toContain("approval.decided");
+    expect(started.payload.priorEventId).toBe(policy.payload.eventId);
+  }
+
+  expect(started.payload).toMatchObject({
+    actionId,
+    actionDigest,
+    argsDigest,
+    status: "started"
+  });
+  expect(completed.payload).toMatchObject({
+    priorEventId: started.payload.eventId,
+    actionId,
+    actionDigest,
+    argsDigest,
+    status: "completed",
+    terminalState: "completed"
+  });
+}
+
 function eventByType(events: RunEvent[], type: string): RunEvent {
   const event = events.find((item) => item.type === type);
   if (!event) throw new Error(`Missing event ${type}`);
   return event;
+}
+
+function stringPayload(event: RunEvent, key: string): string {
+  const value = event.payload[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Expected ${event.type} payload.${key} to be a string`);
+  }
+  return value;
 }
 
 function mapArtifactsByKind(artifacts: Artifact[]): Map<string, Artifact> {

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type RuntimeKind = "codex" | "claude_code";
 export type CodexRuntimeMode = "default" | "read_only" | "full_access" | "auto_review";
 export type ClaudeCodePermissionMode =
@@ -46,6 +48,50 @@ export function transitionRunStatus(current: RunStatus, next: RunStatus): RunSta
 export interface ArtifactRef {
   artifactId: string;
   r2Key: string;
+}
+
+export type ActionKind = "runtime_command" | "command" | "file_write" | "tool_call" | "network_request";
+export type ControlPlaneEventActor = "agent" | "policy" | "human" | "runtime" | "system";
+export type ActionPolicyDecision = "allowed" | "requires_approval" | "blocked";
+export type ActionApprovalDecision = "approved" | "denied";
+export type ActionApprovalMode = "auto" | "manual" | "block";
+
+export interface ControlPlaneAction {
+  type: ActionKind;
+  name: string;
+  target?: string;
+  args: Record<string, unknown>;
+  schemaVersion: string;
+}
+
+export interface CanonicalActionBinding {
+  action: ControlPlaneAction;
+  actionDigest: string;
+  argsDigest: string;
+}
+
+export function bindCanonicalAction(action: ControlPlaneAction): CanonicalActionBinding {
+  const normalizedAction = sortJson(action) as ControlPlaneAction;
+  return {
+    action: normalizedAction,
+    actionDigest: `sha256:${hashStableJson(normalizedAction)}`,
+    argsDigest: `sha256:${hashStableJson(normalizedAction.args)}`
+  };
+}
+
+function hashStableJson(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(sortJson(value))).digest("hex");
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!value || typeof value !== "object") return value;
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, sortJson(item)])
+  );
 }
 
 export interface NormalizedEventPayload {

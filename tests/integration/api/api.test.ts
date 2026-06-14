@@ -237,6 +237,141 @@ describe("AgentRouter API", () => {
     });
   });
 
+  it("records approval decisions as immutable action-bound events", async () => {
+    const createResponse = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        approvalMode: "manual",
+        runtime: { kind: "codex", mode: "default" }
+      }
+    });
+    expect(createResponse.statusCode).toBe(201);
+    const runId = createResponse.json().id as string;
+    const actionId = `action_${randomUUID()}`;
+    const actionDigest = "sha256:approved_action";
+    const argsDigest = "sha256:approved_args";
+    const requestEventId = `evt_${randomUUID()}`;
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        await new RunRepository(client).appendEvent({
+          runId,
+          source: "worker",
+          eventType: "approval.requested",
+          visibility: "public",
+          payload: {
+            eventId: requestEventId,
+            actionId,
+            actionDigest,
+            argsDigest,
+            actor: "system",
+            requestId: `approval_${randomUUID()}`
+          }
+        });
+      });
+    } finally {
+      client.release();
+    }
+
+    const approveResponse = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/actions/${actionId}/approve`,
+      headers: authHeaders(config.apiKey),
+      payload: { actionDigest, reason: "looks safe" }
+    });
+
+    expect(approveResponse.statusCode).toBe(200);
+    expect(approveResponse.json()).toMatchObject({
+      type: "approval.decided",
+      source: "api",
+      payload: {
+        priorEventId: requestEventId,
+        actionId,
+        actionDigest,
+        argsDigest,
+        actor: "human",
+        decision: "approved",
+        reason: "looks safe"
+      }
+    });
+    expect(approveResponse.json().payload.eventId).toMatch(/^evt_/);
+    expect(approveResponse.json().payload.decisionId).toMatch(/^decision_/);
+
+    const duplicateApprove = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/actions/${actionId}/approve`,
+      headers: authHeaders(config.apiKey),
+      payload: { actionDigest, reason: "duplicate click" }
+    });
+    expect(duplicateApprove.statusCode).toBe(200);
+    expect(duplicateApprove.json().sequence).toBe(approveResponse.json().sequence);
+
+    const conflictingDeny = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/actions/${actionId}/deny`,
+      headers: authHeaders(config.apiKey),
+      payload: { actionDigest, reason: "too late" }
+    });
+    expect(conflictingDeny.statusCode).toBe(409);
+    expect(conflictingDeny.json()).toMatchObject({
+      error: { code: "approval_already_decided" }
+    });
+  });
+
+  it("rejects approval decisions that do not match the requested action digest", async () => {
+    const createResponse = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: authHeaders(config.apiKey),
+      payload: {
+        task: "Inspect the repo",
+        approvalMode: "manual",
+        runtime: { kind: "claude_code", permissionMode: "default" }
+      }
+    });
+    expect(createResponse.statusCode).toBe(201);
+    const runId = createResponse.json().id as string;
+    const actionId = `action_${randomUUID()}`;
+
+    const client = await pool.connect();
+    try {
+      await withSearchPath(client, schema, async () => {
+        await new RunRepository(client).appendEvent({
+          runId,
+          source: "worker",
+          eventType: "approval.requested",
+          visibility: "public",
+          payload: {
+            eventId: `evt_${randomUUID()}`,
+            actionId,
+            actionDigest: "sha256:canonical",
+            argsDigest: "sha256:args",
+            actor: "system",
+            requestId: `approval_${randomUUID()}`
+          }
+        });
+      });
+    } finally {
+      client.release();
+    }
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/runs/${runId}/actions/${actionId}/approve`,
+      headers: authHeaders(config.apiKey),
+      payload: { actionDigest: "sha256:tampered" }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: "action_digest_mismatch" }
+    });
+  });
+
   it("rejects unsafe runtime model strings", async () => {
     const response = await server.inject({
       method: "POST",

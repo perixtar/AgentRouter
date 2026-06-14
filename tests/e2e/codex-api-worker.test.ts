@@ -5,8 +5,7 @@ import { Pool } from "pg";
 import {
   agentrouter,
   codex,
-  streamAgent,
-  type RunEvent
+  streamAgent
 } from "@agentrouterhq/sdk";
 import { R2ArtifactStore } from "@agentrouter/artifacts-r2";
 import { buildApiServer } from "@agentrouter/api";
@@ -14,7 +13,7 @@ import { parseAgentRouterEnv } from "@agentrouter/config";
 import { applyPhase1Migrations, dropSchema } from "@agentrouter/db";
 import { DaytonaSandboxDriver } from "@agentrouter/sandbox-daytona";
 import { reapExpiredSandboxes, runOneWorkerIteration, runWorkerLoop } from "@agentrouter/worker";
-import { assertSuccessfulE2ERun } from "./assertions.js";
+import { assertSuccessfulE2ERun, collectEventsAndApproveActions } from "./assertions.js";
 
 loadDotEnv();
 
@@ -90,14 +89,12 @@ describeRealE2E("real Codex API + worker E2E", () => {
         maxWaitMs: 10 * 60 * 1000,
         task:
           "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CODEX_E2E_OK\\n' > reports/agent-smoke.txt. Then summarize the change in one sentence.",
+        approvalMode: "manual",
         runtime: codex({ mode: "full_access", ...(runtimeModel ? { model: runtimeModel } : {}) })
       });
       runIds.push(stream.run.id);
 
-      const events: RunEvent[] = [];
-      for await (const event of stream.events) {
-        events.push(event);
-      }
+      const events = await collectEventsAndApproveActions(sdk, stream.events);
       const result = await stream.finalResult;
 
       await assertSuccessfulE2ERun({
@@ -108,6 +105,23 @@ describeRealE2E("real Codex API + worker E2E", () => {
         runtimeKind: "codex",
         marker: "AR_CODEX_E2E_OK",
         createdPath: "reports/agent-smoke.txt",
+        requiredEventTypes: [
+          "run.claimed",
+          "sandbox.created",
+          "credential_boundary.verified",
+          "action.proposed",
+          "policy.evaluated",
+          "approval.requested",
+          "approval.decided",
+          "execution.started",
+          "execution.completed",
+          "provider.stdout",
+          "provider.stderr",
+          "agent.response",
+          "workspace.file_index_collected",
+          "workspace.patch_collected",
+          "run.completed"
+        ],
         secretCanaries: [
           config.codexApiKey,
           config.daytonaApiKey,
@@ -186,14 +200,12 @@ describeRealE2E("real Codex API + worker E2E", () => {
         maxWaitMs: 10 * 60 * 1000,
         task:
           "Use the shell tool to run exactly: mkdir -p reports && printf 'AR_CODEX_TURN1_OK\\n' > reports/agent-smoke.txt. Then summarize the change in one sentence.",
+        approvalMode: "manual",
         runtime: codex({ mode: "full_access", ...(runtimeModel ? { model: runtimeModel } : {}) })
       });
       runIds.push(first.run.id);
 
-      const firstEvents: RunEvent[] = [];
-      for await (const event of first.events) {
-        firstEvents.push(event);
-      }
+      const firstEvents = await collectEventsAndApproveActions(sdk, first.events);
       const firstResult = await first.finalResult;
 
       await assertSuccessfulE2ERun({
@@ -204,6 +216,23 @@ describeRealE2E("real Codex API + worker E2E", () => {
         runtimeKind: "codex",
         marker: "AR_CODEX_TURN1_OK",
         createdPath: "reports/agent-smoke.txt",
+        requiredEventTypes: [
+          "run.claimed",
+          "sandbox.created",
+          "credential_boundary.verified",
+          "action.proposed",
+          "policy.evaluated",
+          "approval.requested",
+          "approval.decided",
+          "execution.started",
+          "execution.completed",
+          "provider.stdout",
+          "provider.stderr",
+          "agent.response",
+          "workspace.file_index_collected",
+          "workspace.patch_collected",
+          "run.completed"
+        ],
         secretCanaries: [
           config.codexApiKey,
           config.daytonaApiKey,
@@ -224,10 +253,7 @@ describeRealE2E("real Codex API + worker E2E", () => {
       expect(second.conversationId).toBe(firstResult.id);
       expect(second.turnNumber).toBe(2);
 
-      const secondEvents: RunEvent[] = [];
-      for await (const event of second.events) {
-        secondEvents.push(event);
-      }
+      const secondEvents = await collectEventsAndApproveActions(sdk, second.events);
       const secondResult = await second.finalResult;
 
       await assertSuccessfulE2ERun({
@@ -242,6 +268,10 @@ describeRealE2E("real Codex API + worker E2E", () => {
         requiredEventTypes: [
           "run.claimed",
           "sandbox.resumed",
+          "action.proposed",
+          "policy.evaluated",
+          "execution.started",
+          "execution.completed",
           "provider.stdout",
           "provider.stderr",
           "agent.response",
